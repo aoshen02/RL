@@ -2926,10 +2926,10 @@ def test_grpo_advantage_estimator_zero_std():
     1. When std=0 (all rewards identical for a prompt), normalization is skipped and advantage=0
     2. When std>0, advantages are properly normalized by std
     """
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GRPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -2965,10 +2965,10 @@ def test_grpo_advantage_estimator_tensor_shapes():
     1. Small batch size (batch=2, single prompt)
     2. Larger batch size (batch=10, single prompt)
     """
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GRPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -3012,10 +3012,10 @@ def test_grpo_advantage_estimator_negative_advantages():
 
     This test verifies that negative advantages are handled correctly.
     """
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GRPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -3046,10 +3046,10 @@ def test_grpo_advantage_estimator_zero_std_and_zero_advantage():
     1. The advantages are all zero (since reward - mean = 0)
     2. No division by zero occurs (normalization is skipped when std=0)
     """
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GRPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -3075,10 +3075,10 @@ def test_grpo_advantage_estimator_small_nonzero_std():
     This test verifies that small but non-zero std values are still normalized
     (no arbitrary threshold that would skip normalization).
     """
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GRPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -3111,10 +3111,10 @@ def test_grpo_advantage_estimator_small_nonzero_std():
 
 def test_gdpo_advantage_estimator_multiple_rewards():
     """Test GDPOAdvantageEstimator with multiple rewards."""
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GDPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -3134,10 +3134,10 @@ def test_gdpo_advantage_estimator_multiple_rewards():
 
 def test_gdpo_advantage_estimator_single_reward():
     """Test GDPOAdvantageEstimator with multiple rewards."""
-    estimator_config = {
-        "use_leave_one_out_baseline": False,
-        "normalize_rewards": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        use_leave_one_out_baseline=False,
+        normalize_rewards=True,
+    )
     loss_config = ClippedPGLossConfig()
     estimator = GDPOAdvantageEstimator(estimator_config, loss_config)
 
@@ -3191,9 +3191,9 @@ def test_reinforce_plus_plus_global_normalization():
     1. After global normalization, the mean of advantages is approximately 0
     2. The advantages are properly scaled by the global std
     """
-    estimator_config = {
-        "minus_baseline": True,
-    }
+    estimator_config = AdvEstimatorConfig.model_construct(
+        minus_baseline=True,
+    )
     loss_config = ClippedPGLossConfig(
         use_kl_in_reward=False,
         reference_policy_kl_penalty=0.0001,
