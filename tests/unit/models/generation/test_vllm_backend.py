@@ -280,6 +280,35 @@ def test_update_weights_via_ipc_acks_manifest_error_and_returns_false(monkeypatc
 
 
 @pytest.mark.vllm
+@pytest.mark.parametrize("reset_mm_cache_after_refit", [True, False])
+def test_internal_refit_honors_multimodal_cache_reset_policy(
+    reset_mm_cache_after_refit,
+):
+    from nemo_rl.models.generation.vllm.vllm_backend import (
+        VllmInternalWorkerExtension,
+    )
+
+    extension = VllmInternalWorkerExtension.__new__(
+        VllmInternalWorkerExtension
+    )
+    extension.model_runner = SimpleNamespace(
+        reset_mm_cache=MagicMock(),
+        reset_encoder_cache=MagicMock(),
+    )
+
+    extension._clear_multimodal_caches_after_weight_update(
+        reset_mm_cache_after_refit
+    )
+
+    if reset_mm_cache_after_refit:
+        extension.model_runner.reset_mm_cache.assert_called_once_with()
+        extension.model_runner.reset_encoder_cache.assert_called_once_with()
+    else:
+        extension.model_runner.reset_mm_cache.assert_not_called()
+        extension.model_runner.reset_encoder_cache.assert_not_called()
+
+
+@pytest.mark.vllm
 def test_read_mtp_layer_weights_from_checkpoint_filters_and_reads(tmp_path):
     """Only the requested MTP layer tensors are read, across the shards holding them."""
     from nemo_rl.models.generation.vllm.vllm_backend import (

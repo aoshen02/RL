@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import torch
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -24,6 +27,508 @@ from nemo_rl.models.generation.interfaces import (
 )
 
 R3_MISSING_ROUTE_SENTINEL = -1
+
+_VIDEO_SAMPLING_STYLE_ENV = "NRL_VIDEO_SAMPLING_STYLE"
+_VIDEO_SAMPLING_STYLE_CURRENT = "current_fixed"
+_VIDEO_SAMPLING_STYLE_SFT_V2_DURATION = "sft_v2_duration"
+_VIDEO_SAMPLING_STYLE_NEMOTRON_VL = "nemotron_vl"
+_VIDEO_SAMPLING_STYLE_DEFAULT = _VIDEO_SAMPLING_STYLE_SFT_V2_DURATION
+_SUPPORTED_VIDEO_SAMPLING_STYLES = {
+    _VIDEO_SAMPLING_STYLE_CURRENT,
+    _VIDEO_SAMPLING_STYLE_NEMOTRON_VL,
+    _VIDEO_SAMPLING_STYLE_SFT_V2_DURATION,
+}
+
+
+def _get_video_sampling_style() -> str:
+    style = os.environ.get(_VIDEO_SAMPLING_STYLE_ENV, _VIDEO_SAMPLING_STYLE_DEFAULT)
+    style = style.strip().lower()
+    if style not in _SUPPORTED_VIDEO_SAMPLING_STYLES:
+        supported = ", ".join(sorted(_SUPPORTED_VIDEO_SAMPLING_STYLES))
+        raise ValueError(
+            f"Unsupported {_VIDEO_SAMPLING_STYLE_ENV}={style!r}; supported: {supported}"
+        )
+    return style
+
+
+def _get_positive_int_env(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+def _round_video_frame_count(
+    num_frames: int,
+    *,
+    total_frames_in_file: int,
+    max_frames: int,
+    temporal_patch_size: int,
+) -> int:
+    num_frames = min(num_frames, total_frames_in_file)
+    if temporal_patch_size > 1 and num_frames % temporal_patch_size != 0:
+        rounded_down = (num_frames // temporal_patch_size) * temporal_patch_size
+        rounded_up = rounded_down + temporal_patch_size
+        if rounded_up <= total_frames_in_file and rounded_up <= max_frames:
+            num_frames = rounded_up
+        else:
+            num_frames = max(temporal_patch_size, rounded_down)
+    return num_frames
+
+
+def _timestamp_to_video_frame_index(
+    timestamp_s: float, fps: float, total_frames: int
+) -> int:
+    """Convert a timestamp according to the active video sampling contract."""
+    if _get_video_sampling_style() == _VIDEO_SAMPLING_STYLE_NEMOTRON_VL:
+        frame_idx = round(timestamp_s * fps)
+    else:
+        frame_idx = int(timestamp_s * fps)
+    return max(0, min(int(frame_idx), total_frames - 1))
+
+
+def _select_video_frame_count(
+    *,
+    total_duration: float,
+    requested_num_frames: int,
+    total_frames_in_file: int,
+    temporal_patch_size: int,
+) -> int:
+    requested_num_frames = max(1, int(requested_num_frames))
+    if _get_video_sampling_style() == _VIDEO_SAMPLING_STYLE_SFT_V2_DURATION:
+        min_frames = _get_positive_int_env("NRL_VIDEO_SFT_MIN_FRAMES", 8)
+        max_frames = _get_positive_int_env("NRL_VIDEO_SFT_MAX_FRAMES", 256)
+        default_fps = _get_positive_int_env("NRL_VIDEO_SFT_DEFAULT_FPS", 2)
+        if total_frames_in_file < min_frames:
+            num_frames = total_frames_in_file
+        else:
+            duration_frames = int(default_fps * total_duration)
+            num_frames = min(max(duration_frames, min_frames), max_frames)
+        num_frames = min(num_frames, requested_num_frames)
+    else:
+        num_frames = requested_num_frames
+
+    return _round_video_frame_count(
+        num_frames,
+        total_frames_in_file=total_frames_in_file,
+        max_frames=requested_num_frames,
+        temporal_patch_size=temporal_patch_size,
+    )
+
+
+def _compute_video_timestamps(
+    total_duration: float,
+    num_frames: int,
+    total_frames_in_file: int,
+    original_num_frames: int,
+    temporal_patch_size: int,
+) -> tuple[int, list[float]]:
+    num_frames = _select_video_frame_count(
+        total_duration=total_duration,
+        requested_num_frames=original_num_frames,
+        total_frames_in_file=total_frames_in_file,
+        temporal_patch_size=temporal_patch_size,
+    )
+
+    if _get_video_sampling_style() == _VIDEO_SAMPLING_STYLE_NEMOTRON_VL:
+        if num_frames <= 1 or total_duration <= 0 or total_frames_in_file <= 1:
+            return max(1, num_frames), [0.0]
+        fps = total_frames_in_file / total_duration
+        last_timestamp_s = (total_frames_in_file - 1) / fps
+        timestamps_s = np.linspace(0.0, last_timestamp_s, num_frames, dtype=float)
+        frame_indices = [
+            max(0, min(round(float(ts) * fps), total_frames_in_file - 1))
+            for ts in timestamps_s
+        ]
+        timestamps_s = [idx / fps for idx in frame_indices]
+        return num_frames, timestamps_s
+
+    if num_frames <= 1:
+        return 1, [total_duration / 2.0]
+
+    effective_span = max(total_duration - 1, 0)
+    segment_size = effective_span / num_frames
+    return num_frames, [
+        segment_size * (frame_idx + 0.5) for frame_idx in range(num_frames)
+    ]
+
+
+def _build_video_metadata(
+    *,
+    fps: float,
+    total_frames: int,
+    sampled_indices: list[int],
+    backend: str,
+) -> dict[str, Any]:
+    return {
+        "fps": fps,
+        "duration": total_frames / fps,
+        "total_num_frames": total_frames,
+        "frames_indices": sampled_indices,
+        "video_backend": backend,
+        "video_sampling_style": _get_video_sampling_style(),
+        "do_sample_frames": False,
+    }
+
+
+def _load_video_frames_pyav_with_metadata(
+    video_path: str,
+    num_frames: int = 8,
+    temporal_patch_size: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    import av
+
+    try:
+        container = av.open(video_path)
+    except Exception as exc:
+        raise ValueError(f"Cannot open video: {video_path}") from exc
+
+    if not container.streams.video:
+        container.close()
+        raise ValueError(f"No video stream in {video_path}")
+
+    stream = container.streams.video[0]
+    stream.codec_context.thread_type = "NONE"
+    fps = float(stream.average_rate) if stream.average_rate else 0.0
+    if fps <= 0:
+        container.close()
+        raise ValueError(f"Video has invalid fps ({fps}): {video_path}")
+
+    total_frames = stream.frames
+    if total_frames <= 0:
+        if stream.duration and stream.time_base:
+            duration_estimate = float(stream.duration * stream.time_base)
+        elif container.duration:
+            duration_estimate = container.duration / av.time_base
+        else:
+            duration_estimate = 0.0
+        total_frames = max(1, int(duration_estimate * fps))
+    total_duration = total_frames / fps
+
+    num_frames, timestamps_s = _compute_video_timestamps(
+        total_duration,
+        num_frames,
+        total_frames,
+        num_frames,
+        temporal_patch_size,
+    )
+    time_base = float(stream.time_base) if stream.time_base else 1.0 / fps
+    target_pts_list = [int(timestamp / time_base) for timestamp in timestamps_s]
+    sampled_indices = [
+        _timestamp_to_video_frame_index(timestamp, fps, total_frames)
+        for timestamp in timestamps_s
+    ]
+
+    frames: list[np.ndarray] = []
+    try:
+        if target_pts_list:
+            container.seek(max(0, target_pts_list[0]), stream=stream, any_frame=False)
+        target_idx = 0
+        best_frame = None
+        frame_counter = 0
+        for frame in container.decode(video=0):
+            if target_idx >= len(target_pts_list):
+                break
+            best_frame = frame
+            frame_counter += 1
+            if frame.pts is None:
+                while (
+                    target_idx < len(target_pts_list)
+                    and frame_counter >= target_idx + 1
+                ):
+                    frames.append(frame.reformat(format="rgb24").to_ndarray())
+                    target_idx += 1
+                continue
+            frame_end = frame.pts + (frame.duration if frame.duration else 1)
+            while (
+                target_idx < len(target_pts_list)
+                and target_pts_list[target_idx] < frame_end
+            ):
+                frames.append(frame.reformat(format="rgb24").to_ndarray())
+                target_idx += 1
+        if best_frame is not None:
+            last_frame = best_frame.reformat(format="rgb24").to_ndarray()
+            while len(frames) < len(target_pts_list):
+                frames.append(last_frame.copy())
+    finally:
+        container.close()
+
+    if not frames:
+        raise ValueError(f"Failed to extract any frames from video: {video_path}")
+    metadata = _build_video_metadata(
+        fps=fps,
+        total_frames=total_frames,
+        sampled_indices=sampled_indices,
+        backend="pyav",
+    )
+    return np.stack(frames), metadata
+
+
+def _load_video_frames_decord_with_metadata(
+    video_path: str,
+    num_frames: int = 8,
+    temporal_patch_size: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    from decord import VideoReader
+    from decord import cpu as decord_cpu
+
+    reader = VideoReader(video_path, ctx=decord_cpu(), num_threads=1)
+    total_frames = len(reader)
+    if total_frames <= 0:
+        raise ValueError(f"Video has no frames: {video_path}")
+    fps = reader.get_avg_fps()
+    if fps <= 0:
+        raise ValueError(f"Video has invalid fps ({fps}): {video_path}")
+
+    num_frames, timestamps_s = _compute_video_timestamps(
+        total_frames / fps,
+        num_frames,
+        total_frames,
+        num_frames,
+        temporal_patch_size,
+    )
+    indices = [
+        _timestamp_to_video_frame_index(timestamp, fps, total_frames)
+        for timestamp in timestamps_s
+    ]
+    metadata = _build_video_metadata(
+        fps=fps,
+        total_frames=total_frames,
+        sampled_indices=indices,
+        backend="decord",
+    )
+    return reader.get_batch(indices).asnumpy(), metadata
+
+
+def _load_video_frames_vllm_with_metadata(
+    video_path: str,
+    num_frames: int = 8,
+    temporal_patch_size: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Decode video with the same loader used by raw Gym vLLM requests."""
+    del temporal_patch_size
+    from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+
+    loader_name = os.environ.get("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    loader = VIDEO_LOADER_REGISTRY.load(loader_name)
+    frames, metadata = loader.load_bytes(
+        Path(video_path).read_bytes(), num_frames=int(num_frames)
+    )
+    if frames.ndim != 4 or frames.shape[-1] != 3 or frames.shape[0] == 0:
+        raise ValueError(
+            f"vLLM video loader {loader_name!r} returned invalid frames "
+            f"with shape {frames.shape}: {video_path}"
+        )
+    metadata = dict(metadata)
+    metadata["video_sampling_style"] = _get_video_sampling_style()
+    return frames, metadata
+
+
+def _load_video_frames_torchcodec_with_metadata(
+    video_path: str,
+    num_frames: int = 8,
+    temporal_patch_size: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Decode video with the repository's optional TorchCodec dependency."""
+    from transformers.video_utils import load_video
+
+    def sample_indices(metadata: Any, **_: Any) -> np.ndarray:
+        total_frames = int(metadata.total_num_frames)
+        fps = float(metadata.fps or 0.0)
+        if total_frames <= 0:
+            raise ValueError(f"Video has no frames: {video_path}")
+        if fps <= 0:
+            raise ValueError(f"Video has invalid fps ({fps}): {video_path}")
+
+        _, timestamps_s = _compute_video_timestamps(
+            total_frames / fps,
+            num_frames,
+            total_frames,
+            num_frames,
+            temporal_patch_size,
+        )
+        return np.asarray(
+            [
+                _timestamp_to_video_frame_index(timestamp, fps, total_frames)
+                for timestamp in timestamps_s
+            ],
+            dtype=np.int64,
+        )
+
+    try:
+        frames, metadata = load_video(
+            video_path,
+            backend="torchcodec",
+            sample_indices_fn=sample_indices,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "Gym video preprocessing requires the optional video dependencies. "
+            "Run `bash tools/install_audio_deps.sh` before training."
+        ) from exc
+
+    if torch.is_tensor(frames):
+        frames = frames.detach().cpu().numpy()
+    frames = np.asarray(frames)
+    if frames.ndim == 4 and frames.shape[1] in (1, 3, 4):
+        frames = frames.transpose(0, 2, 3, 1)
+    if frames.ndim != 4 or frames.shape[-1] != 3 or frames.shape[0] == 0:
+        raise ValueError(
+            "TorchCodec returned invalid RGB video frames "
+            f"with shape {frames.shape}: {video_path}"
+        )
+
+    metadata = dict(metadata)
+    metadata["frames_indices"] = [
+        int(frame_idx) for frame_idx in metadata.get("frames_indices", [])
+    ]
+    metadata["video_sampling_style"] = _get_video_sampling_style()
+    metadata["do_sample_frames"] = False
+    return frames, metadata
+
+
+def register_torchcodec_vllm_video_loader() -> bool:
+    """Use TorchCodec for raw Nemotron video bytes parsed by vLLM's HTTP server.
+
+    vLLM's ``nemotron_vl`` loader defaults to OpenCV, while NeMo-RL deliberately
+    does not ship OpenCV or PyAV. Registering this structural ``VideoLoader``
+    implementation under the same extension name keeps vLLM's media connector
+    contract and makes rollout decoding match policy-logprob preprocessing.
+
+    Returns:
+        Whether the TorchCodec loader was registered.
+    """
+    video_backend = os.environ.get("NRL_VIDEO_BACKEND", "torchcodec").strip().lower()
+    vllm_loader = os.environ.get("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    if video_backend != "torchcodec" or vllm_loader != "nemotron_vl":
+        return False
+
+    try:
+        from torchcodec.decoders import VideoDecoder
+    except ImportError as exc:
+        raise ImportError(
+            "Gym video generation requires the optional video dependencies. "
+            "Run `bash tools/install_audio_deps.sh` before training."
+        ) from exc
+
+    from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+
+    class TorchCodecNemotronVLVideoBackend:
+        @classmethod
+        def load_bytes(
+            cls,
+            data: bytes,
+            num_frames: int = -1,
+            fps: int = -1,
+            max_duration: int = 300,
+            frame_recovery: bool = False,
+            **kwargs: Any,
+        ) -> tuple[np.ndarray, dict[str, Any]]:
+            del cls, max_duration, kwargs
+            if frame_recovery:
+                raise ValueError(
+                    "frame_recovery is not supported by the TorchCodec video loader"
+                )
+
+            decoder = VideoDecoder(
+                data,
+                dimension_order="NHWC",
+                num_ffmpeg_threads=0,
+                device="cpu",
+                seek_mode="exact",
+            )
+            total_frames = int(decoder.metadata.num_frames or 0)
+            source_fps = float(decoder.metadata.average_fps or 0.0)
+            if total_frames <= 0:
+                raise ValueError("Video has no frames")
+            if source_fps <= 0:
+                raise ValueError(f"Video has invalid fps ({source_fps})")
+
+            requested_num_frames = (
+                total_frames if int(num_frames) < 0 else int(num_frames)
+            )
+            if fps > 0:
+                duration_limited_frames = max(
+                    1, int((total_frames / source_fps) * float(fps))
+                )
+                requested_num_frames = min(
+                    requested_num_frames, duration_limited_frames
+                )
+
+            _, timestamps_s = _compute_video_timestamps(
+                total_frames / source_fps,
+                requested_num_frames,
+                total_frames,
+                requested_num_frames,
+                temporal_patch_size=1,
+            )
+            sampled_indices = [
+                _timestamp_to_video_frame_index(timestamp, source_fps, total_frames)
+                for timestamp in timestamps_s
+            ]
+            frames = decoder.get_frames_at(indices=sampled_indices).data
+            if torch.is_tensor(frames):
+                frames = frames.detach().cpu().numpy()
+            frames = np.asarray(frames)
+            if frames.ndim != 4 or frames.shape[-1] != 3 or frames.shape[0] == 0:
+                raise ValueError(
+                    "TorchCodec returned invalid RGB video frames "
+                    f"with shape {frames.shape}"
+                )
+
+            metadata = _build_video_metadata(
+                fps=source_fps,
+                total_frames=total_frames,
+                sampled_indices=sampled_indices,
+                backend="torchcodec_nemotron_vl",
+            )
+            metadata["original_video_bytes"] = data
+            return frames, metadata
+
+    VIDEO_LOADER_REGISTRY.register("nemotron_vl")(TorchCodecNemotronVLVideoBackend)
+    return True
+
+
+def load_video_frames_with_metadata(
+    video_path: str,
+    num_frames: int = 8,
+    temporal_patch_size: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Load sampled RGB frames and the sampling metadata used by vLLM."""
+    backend = os.environ.get("NRL_VIDEO_BACKEND", "torchcodec").strip().lower()
+    if backend == "torchcodec":
+        return _load_video_frames_torchcodec_with_metadata(
+            video_path, num_frames, temporal_patch_size
+        )
+    if backend == "vllm":
+        return _load_video_frames_vllm_with_metadata(
+            video_path, num_frames, temporal_patch_size
+        )
+    if backend == "decord":
+        return _load_video_frames_decord_with_metadata(
+            video_path, num_frames, temporal_patch_size
+        )
+    if backend != "pyav":
+        raise ValueError(
+            f"Unsupported NRL_VIDEO_BACKEND={backend!r}; "
+            "supported: 'torchcodec', 'pyav', 'decord', 'vllm'"
+        )
+    return _load_video_frames_pyav_with_metadata(
+        video_path, num_frames, temporal_patch_size
+    )
+
+
+def load_video_frames(
+    video_path: str,
+    num_frames: int = 8,
+    temporal_patch_size: int = 1,
+) -> np.ndarray:
+    """Load sampled RGB video frames without returning metadata."""
+    frames, _ = load_video_frames_with_metadata(
+        video_path, num_frames, temporal_patch_size
+    )
+    return frames
+
 
 # The expert-id range vs carry dtype is model-constant, so it is verified on the
 # first non-empty routed-experts tensor per process and skipped afterwards.

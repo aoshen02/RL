@@ -18,7 +18,8 @@ import logging
 import re
 from collections import defaultdict
 from io import BytesIO
-from typing import Any, Optional, Protocol, Union
+from pathlib import Path
+from typing import Any, Optional, Union
 
 import requests
 import torch
@@ -65,6 +66,7 @@ MEDIA_TAG_PATTERN = re.compile(
 )
 
 logger = logging.getLogger(__name__)
+
 
 def _images_from_messages(messages: list[dict[str, Any]]) -> list[Image.Image]:
     images = []
@@ -164,6 +166,7 @@ class PackedTensor:
         dim_to_pack: int,
         *,
         pad_to_max_shape: bool = False,
+        dedup_indices: Optional[list[int]] = None,
     ) -> None:
         assert tensors is not None, "Input tensors to PackedTensor cannot be None"
 
@@ -180,6 +183,15 @@ class PackedTensor:
             )
         self.dim_to_pack = dim_to_pack
         self.pad_to_max_shape = pad_to_max_shape
+        if dedup_indices is not None:
+            assert dedup_indices, "dedup_indices must be non-empty when provided"
+            assert min(dedup_indices) >= 0, (
+                "dedup_indices must contain only non-negative values"
+            )
+            assert max(dedup_indices) < len(self.tensors), (
+                "dedup_indices cannot reference out-of-range unique tensor indices"
+            )
+        self._dedup_indices = dedup_indices
 
     def as_tensor(
         self, device: Optional[torch.device] = None
@@ -189,7 +201,10 @@ class PackedTensor:
             for i, item in enumerate(self.tensors):
                 if item is not None:
                     self.tensors[i] = item.to(device)
-        non_none_tensors = [t for t in self.tensors if t is not None]
+        tensors = self.tensors
+        if self._dedup_indices is not None:
+            tensors = [self.tensors[index] for index in self._dedup_indices]
+        non_none_tensors = [t for t in tensors if t is not None]
         if len(non_none_tensors) == 0:
             return None
 
@@ -239,10 +254,11 @@ class PackedTensor:
         return torch.cat(non_none_tensors, dim=self.dim_to_pack).to(device)
 
     def __len__(self) -> int:
-        # this is the number of tensors in this data wrapper
+        if self._dedup_indices is not None:
+            return len(self._dedup_indices)
         return len(self.tensors)
 
-    def to(self, device: str | torch.device) -> "PackedTensor":
+    def to(self, device: str | torch.device | torch.dtype) -> "PackedTensor":
         self.tensors = [
             item.to(device) if item is not None else None for item in self.tensors
         ]
@@ -250,6 +266,19 @@ class PackedTensor:
 
     def slice(self, indices: Union[list[int], torch.Tensor]) -> "PackedTensor":
         idx = indices.tolist() if isinstance(indices, torch.Tensor) else indices
+        if self._dedup_indices is not None:
+            selected = [self._dedup_indices[i] for i in idx]
+            used_unique_indices = sorted(set(selected))
+            remap = {
+                old_index: new_index
+                for new_index, old_index in enumerate(used_unique_indices)
+            }
+            return PackedTensor(
+                [self.tensors[i] for i in used_unique_indices],
+                self.dim_to_pack,
+                pad_to_max_shape=self.pad_to_max_shape,
+                dedup_indices=[remap[i] for i in selected],
+            )
         tensors = [self.tensors[i] for i in idx]
         return PackedTensor(
             tensors,
@@ -264,6 +293,9 @@ class PackedTensor:
             [None] * len(other.tensors),
             other.dim_to_pack,
             pad_to_max_shape=other.pad_to_max_shape,
+            dedup_indices=(
+                list(other._dedup_indices) if other._dedup_indices is not None else None
+            ),
         )
 
     @classmethod
@@ -296,6 +328,30 @@ class PackedTensor:
         assert len(set(pad_to_max_shapes)) == 1, (
             "All packed tensors must have the same pad_to_max_shape setting"
         )
+        if any(
+            packed_tensor._dedup_indices is not None
+            for packed_tensor in from_packed_tensors
+        ):
+            tensors: list[Optional[torch.Tensor]] = []
+            dedup_indices: list[int] = []
+            offset = 0
+            for packed_tensor in from_packed_tensors:
+                tensors.extend(packed_tensor.tensors)
+                if packed_tensor._dedup_indices is None:
+                    dedup_indices.extend(
+                        range(offset, offset + len(packed_tensor.tensors))
+                    )
+                else:
+                    dedup_indices.extend(
+                        offset + index for index in packed_tensor._dedup_indices
+                    )
+                offset += len(packed_tensor.tensors)
+            return cls(
+                tensors,
+                dim_to_packs[0],
+                pad_to_max_shape=pad_to_max_shapes[0],
+                dedup_indices=dedup_indices,
+            )
         # concatenate the tensors
         tensors = []
         for packed_tensor in from_packed_tensors:
@@ -305,6 +361,57 @@ class PackedTensor:
             tensors,
             dim_to_pack,
             pad_to_max_shape=pad_to_max_shapes[0],
+        )
+
+    def deduplicate(self, prompt_indices: torch.Tensor | list[int]) -> "PackedTensor":
+        """Share physical tensors for logical positions with the same prompt id."""
+        indices = (
+            prompt_indices.tolist()
+            if isinstance(prompt_indices, torch.Tensor)
+            else prompt_indices
+        )
+        assert len(indices) == len(self), (
+            f"PackedTensor has {len(self)} logical entries but received "
+            f"{len(indices)} prompt indices"
+        )
+        logical_tensors = (
+            [self.tensors[index] for index in self._dedup_indices]
+            if self._dedup_indices is not None
+            else self.tensors
+        )
+
+        seen: dict[int, int] = {}
+        unique_tensors: list[Optional[torch.Tensor]] = []
+        dedup_indices: list[int] = []
+        for tensor, prompt_index in zip(logical_tensors, indices, strict=True):
+            prompt_index = int(prompt_index)
+            if prompt_index not in seen:
+                seen[prompt_index] = len(unique_tensors)
+                unique_tensors.append(tensor)
+            dedup_indices.append(seen[prompt_index])
+        return PackedTensor(
+            unique_tensors,
+            self.dim_to_pack,
+            pad_to_max_shape=self.pad_to_max_shape,
+            dedup_indices=dedup_indices,
+        )
+
+    def repeat_interleave(self, num_repeats: int) -> "PackedTensor":
+        """Repeat logical rows while sharing their physical tensors."""
+        assert num_repeats >= 1, "num_repeats must be positive"
+        source_indices = (
+            self._dedup_indices
+            if self._dedup_indices is not None
+            else list(range(len(self.tensors)))
+        )
+        repeated_indices = [
+            index for index in source_indices for _ in range(num_repeats)
+        ]
+        return PackedTensor(
+            list(self.tensors),
+            self.dim_to_pack,
+            pad_to_max_shape=self.pad_to_max_shape,
+            dedup_indices=repeated_indices,
         )
 
     @classmethod
@@ -450,10 +557,16 @@ def extract_multimodal_model_inputs(
 
     extracted: dict[str, PackedTensor | torch.Tensor] = {}
     multimodal_keys = list(get_multimodal_keys_from_processor(processor))
-    # Some remote-code processors omit this per-image input from their declared
-    # model_input_names even though their model forward requires it.
-    if "imgs_sizes" in processed and "imgs_sizes" not in multimodal_keys:
-        multimodal_keys.append("imgs_sizes")
+    # Some remote-code processors omit these media inputs from their declared
+    # model_input_names even though their model forward requires them.
+    for key in (
+        "imgs_sizes",
+        "num_frames",
+        "pixel_values_flat",
+        "image_num_patches",
+    ):
+        if key in processed and key not in multimodal_keys:
+            multimodal_keys.append(key)
     for key in multimodal_keys:
         if key not in processed:
             continue
@@ -532,11 +645,11 @@ def image_to_data_url(image: Image.Image, fmt: str = "PNG") -> str:
 
 
 def encode_images_in_examples(nemo_gym_examples: list[dict]) -> list[dict]:
-    """Walk examples and replace local image paths with base64 data URLs.
+    """Normalize local media in Gym examples for vLLM HTTP requests.
 
     Operates in-place on each example's responses_create_params.input[].content[]
-    items of type 'input_image'. HTTP(S) and data URLs are preserved; local
-    paths, including file:// URLs, are encoded as data URLs.
+    items. Images become data URLs. Bare local video paths become file URLs;
+    already-qualified HTTP(S), data, and file URLs are preserved.
     """
     for example in nemo_gym_examples:
         input_items = example.get("responses_create_params", {}).get("input", [])
@@ -549,16 +662,32 @@ def encode_images_in_examples(nemo_gym_examples: list[dict]) -> list[dict]:
             if not isinstance(content, list):
                 continue
             for part in content:
-                if not isinstance(part, dict) or part.get("type") != "input_image":
+                if not isinstance(part, dict):
                     continue
-                url = part.get("image_url", "")
+                part_type = part.get("type")
+                if part_type == "input_image":
+                    media_key = "image_url"
+                elif part_type in ("input_video", "video", "video_url"):
+                    media_key = "video_url" if "video_url" in part else "video"
+                else:
+                    continue
+
+                url = part.get(media_key, "")
                 if isinstance(url, dict):
                     url = url.get("url", "")
                 if not isinstance(url, str) or not url:
                     continue
-                if url.startswith(("http://", "https://", "data:")):
+                if url.startswith(("http://", "https://", "data:", "file://")):
                     continue
-                part["image_url"] = image_to_data_url(resolve_to_image(url))
+                if part_type == "input_image":
+                    part[media_key] = image_to_data_url(resolve_to_image(url))
+                else:
+                    normalized_url = Path(url).expanduser().resolve().as_uri()
+                    original_value = part.get(media_key)
+                    if isinstance(original_value, dict):
+                        original_value["url"] = normalized_url
+                    else:
+                        part[media_key] = normalized_url
     return nemo_gym_examples
 
 

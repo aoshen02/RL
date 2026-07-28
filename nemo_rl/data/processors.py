@@ -461,7 +461,7 @@ def vlm_hf_data_processor(
     from nemo_rl.data.datasets.response_datasets.refcoco import format_refcoco_dataset
     from nemo_rl.data.multimodal_utils import (
         PackedTensor,
-        extract_multimodal_model_inputs,
+        get_dim_to_pack_along,
         get_multimodal_default_settings_from_processor,
         process_multimodal_chat,
         resolve_to_image,
@@ -551,6 +551,13 @@ def vlm_hf_data_processor(
         user_message["content"] = task_data_spec.prompt.format(problem)
 
     images = [resolve_to_image(image) for image in images]
+    placeholder_style_processors = {
+        "NemotronNanoVLV2Processor",
+        "NemotronH_Nano_Omni_Reasoning_V3Processor",
+    }
+    _uses_image_placeholder = type(processor).__name__ in (
+        placeholder_style_processors
+    )
 
     # Render once for vLLM and process the identical conversation for MCore.
     # Registered adapters cover processors with nonstandard image placeholder
@@ -746,9 +753,26 @@ def nemo_gym_data_processor(
     rows therefore use a placeholder here; VLM inputs are processed once after
     the complete rollout has been collected.
     """
+    extra_env_info = json.loads(datum_dict["extra_env_info"])
+    if hasattr(tokenizer, "apply_chat_template") and hasattr(tokenizer, "tokenizer"):
+        from nemo_rl.environments.nemo_gym import (
+            nemo_gym_example_to_video_datum_spec,
+        )
+
+        video_output = nemo_gym_example_to_video_datum_spec(
+            extra_env_info,
+            processor=tokenizer,
+            max_seq_length=max_seq_length,
+            idx=idx,
+            task_name=datum_dict["task_name"],
+            data_config=task_data_spec,
+        )
+        if video_output is not None:
+            return cast(DatumSpec, video_output)
+
     output: DatumSpec = {
         # load to dict format here since `Dataset` cannot handle nested structure well in `NemoGymDataset`
-        "extra_env_info": json.loads(datum_dict["extra_env_info"]),
+        "extra_env_info": extra_env_info,
         "loss_multiplier": 1.0,
         "idx": idx,
         "task_name": datum_dict["task_name"],

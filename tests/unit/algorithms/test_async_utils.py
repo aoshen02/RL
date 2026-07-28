@@ -1202,6 +1202,7 @@ class TestAsyncTrajectoryCollector:
             "grpo": {
                 "num_prompts_per_step": 2,
                 "num_generations_per_prompt": 3,
+                "max_num_epochs": 1,
                 "max_rollout_turns": 1,
                 "async_grpo": {"max_trajectory_age_steps": 2},
             },
@@ -1364,6 +1365,39 @@ class TestAsyncTrajectoryCollector:
         collector.resume_after_refit()
 
         collector.policy_generation.invalidate_kv_cache.assert_not_called()
+
+    @pytest.mark.parametrize("reset_mm_cache_after_refit", [True, False])
+    def test_prepare_for_refit_waits_before_multimodal_cache_reset(
+        self, reset_mm_cache_after_refit
+    ):
+        collector = self.create_local_collector()
+        collector.master_config = MasterConfig.model_construct(
+            grpo={
+                "async_grpo": {
+                    "in_flight_weight_updates": True,
+                }
+            },
+            policy={
+                "generation": {
+                    "backend": "vllm",
+                    "vllm_cfg": {
+                        "async_engine": True,
+                        "reset_mm_cache_after_refit": reset_mm_cache_after_refit,
+                    },
+                    "vllm_kwargs": {
+                        "limit_mm_per_prompt": {"video": 1},
+                    },
+                }
+            },
+        )
+        collector.wait_for_pending_generations = mock.MagicMock()
+
+        collector.prepare_for_refit()
+
+        if reset_mm_cache_after_refit:
+            collector.wait_for_pending_generations.assert_called_once_with()
+        else:
+            collector.wait_for_pending_generations.assert_not_called()
 
     def test_calculate_target_weights(self):
         """Test target weight calculation logic."""

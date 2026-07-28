@@ -43,11 +43,13 @@ from nemo_rl.models.generation.interfaces import (
 from nemo_rl.models.generation.vllm.checkpoint_engine import (
     VllmAsyncCheckpointEngineRpcMixin,
 )
+from nemo_rl.models.generation.vllm.config import should_reset_mm_cache_after_refit
 from nemo_rl.models.generation.vllm.utils import (
     attach_routed_experts_to_chat_response_choices,
     format_prompt_for_vllm_generation,
     model_dump_chat_response_with_routed_experts,
     pad_and_align_routed_expert_indices,
+    register_torchcodec_vllm_video_loader,
 )
 from nemo_rl.models.generation.vllm.vllm_worker import BaseVllmGenerationWorker
 from nemo_rl.models.generation.openai_server_utils import (
@@ -162,6 +164,8 @@ class VllmAsyncGenerationWorkerImpl(
         self._load_model(self._deferred_bundle_indices, self._deferred_seed)
 
     def _create_engine(self, llm_kwargs: dict[str, Any]) -> None:
+        register_torchcodec_vllm_video_loader()
+
         from vllm.config import CompilationConfig
         from vllm.engine.arg_utils import AsyncEngineArgs
         from vllm.v1.engine.async_llm import AsyncLLM
@@ -325,6 +329,11 @@ class VllmAsyncGenerationWorkerImpl(
 
     async def post_init_async(self):
         if self.llm is not None:
+            # AsyncLLM.collective_rpc must be awaited. Keep this initialization
+            # before colocated sleep releases the RADIO parameters' CUDA storage.
+            await self.llm.collective_rpc(
+                "_initialize_nemotron_omni_radio_layerscale", args=tuple()
+            )
             await self.llm.collective_rpc("bind_numa", args=tuple())
         self.vllm_device_ids = await self.report_device_id_async()
         if self._mtp_load_from_disk:
@@ -353,6 +362,7 @@ class VllmAsyncGenerationWorkerImpl(
 
         from fastapi import Request
         from fastapi.responses import JSONResponse, StreamingResponse
+        from vllm.entrypoints.chat_utils import load_chat_template
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionRequest,
             ChatCompletionResponse,
@@ -642,6 +652,9 @@ class VllmAsyncGenerationWorkerImpl(
         )
         serving_chat_kwargs = serving_chat_default_kwargs | self.cfg["vllm_cfg"].get(
             "http_server_serving_chat_kwargs", dict()
+        )
+        serving_chat_kwargs["chat_template"] = load_chat_template(
+            serving_chat_kwargs["chat_template"]
         )
         # vLLM 0.20's OpenAIServingChat.__init__ does not accept
         # ``chat_template_kwargs`` — the Jinja kwargs are threaded per-request via
@@ -1334,6 +1347,20 @@ class VllmAsyncGenerationWorkerImpl(
         """Async version of prepare_refit_info."""
         await self.llm.collective_rpc("prepare_refit_info", args=(state_dict_info,))
 
+    async def _reset_multimodal_caches(self) -> None:
+        """Reset engine-level multimodal and encoder caches while idle."""
+        if self.llm is None:
+            return
+        if hasattr(self.llm, "reset_mm_cache"):
+            await self.llm.reset_mm_cache()
+        if hasattr(self.llm, "reset_encoder_cache"):
+            await self.llm.reset_encoder_cache()
+
+    async def _invalidate_mm_cache_after_refit(self) -> None:
+        """Invalidate weight-dependent multimodal caches after a refit."""
+        if should_reset_mm_cache_after_refit(self.cfg):
+            await self._reset_multimodal_caches()
+
     async def update_weights_via_ipc_zmq_async(
         self,
     ) -> bool:
@@ -1350,7 +1377,8 @@ class VllmAsyncGenerationWorkerImpl(
 
             # TODO: switch to update_weights_from_local_ipc_handles for better performance once collectively report_device_id is supported in asyncLLM initialization
             result_or_coro = await self.llm.collective_rpc(
-                "update_weights_via_ipc_zmq", args=tuple()
+                "update_weights_via_ipc_zmq",
+                args=(should_reset_mm_cache_after_refit(self.cfg),),
             )
 
             if asyncio.iscoroutine(result_or_coro):
@@ -1365,6 +1393,7 @@ class VllmAsyncGenerationWorkerImpl(
                     f"Error: Worker failed to update weights. Results: {worker_results}"
                 )
                 return False
+            await self._invalidate_mm_cache_after_refit()
             return True
         except Exception as e:
             print(f"Exception during collective_rpc for weight update: {e}")
@@ -1386,7 +1415,8 @@ class VllmAsyncGenerationWorkerImpl(
                 )
 
             result_or_coro = await self.llm.collective_rpc(
-                "update_weights_from_collective", args=tuple()
+                "update_weights_from_collective",
+                args=(should_reset_mm_cache_after_refit(self.cfg),),
             )
 
             if asyncio.iscoroutine(result_or_coro):
@@ -1401,6 +1431,7 @@ class VllmAsyncGenerationWorkerImpl(
                     f"Error: Worker failed to update weights. Results: {worker_results}"
                 )
                 return False
+            await self._invalidate_mm_cache_after_refit()
             return True
         except Exception as e:
             print(f"Exception during collective_rpc for weight update: {e}")
