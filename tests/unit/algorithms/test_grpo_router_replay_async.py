@@ -60,6 +60,11 @@ def _make_async_master_config(data_plane=None) -> MasterConfig:
                 },
             },
             "loss_fn": SimpleNamespace(use_importance_sampling_correction=True),
+            "grpo": {
+                "async_grpo": {
+                    "max_generation_failures": 0,
+                },
+            },
             "data_plane": data_plane,
         }
     )
