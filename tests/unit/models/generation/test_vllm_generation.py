@@ -1555,7 +1555,6 @@ def test_vllm_http_server(cluster, tokenizer):
         top_p=generation_config["top_p"],
         # We want to test the actual train flow and how this is used. So we need to get logprobs here.
         logprobs=True,
-        return_tokens_as_token_ids=True,
         max_tokens=1,
     )
 
@@ -1649,6 +1648,17 @@ def test_vllm_http_server(cluster, tokenizer):
         actual_result["choices"][0]["logprobs"]["content"][0]["logprob"]
     ]
     assert _standardize(expected_result) == _standardize(actual_result)
+
+    # The server default requests token IDs, so top_logprobs=None cannot provide
+    # the log probabilities required by the training response contract.
+    response = requests.post(
+        url=f"{base_urls[0]}/chat/completions",
+        json=body | {"top_logprobs": None},
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == 400
+    assert "top_logprobs" in error["message"]
 
     # Check that tokenization route works
     response = requests.post(url=f"{base_urls[0]}/../tokenize", json=body)
@@ -1962,6 +1972,10 @@ async def test_vllm_http_server_correct_merged_tokens_matches_baseline(
         url=f"{base_urls[0]}/chat/completions", json=body_with_reference_token_ids
     )
     vllm_http_server_result = response.json()
+    assert (
+        vllm_http_server_result["choices"][0]["message"]["prompt_token_ids"]
+        == initial_tokenized_query_ids
+    )
     vllm_http_server_generated_token = vllm_http_server_result["choices"][0][
         "logprobs"
     ]["content"][0]
