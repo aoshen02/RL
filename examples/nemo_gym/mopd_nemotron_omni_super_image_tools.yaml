@@ -1,0 +1,410 @@
+# Nemotron Omni Super multi-turn MOPD with image-tool calling.
+#
+# Super student distilled from a Super teacher over image_zoom_agent rollouts
+# (this repo's 3rdparty/Gym-workspace/Gym/responses_api_agents/image_zoom_agent).
+# The repo's other MOPD recipe, examples/configs/recipes/llm/
+# mopd-qwen3-1.7b-3n8g-megatron-pack.yaml, is text-only and single-turn.
+#
+# Rollout on each task:
+#   1. Seed turn carries a chart or document image plus a question.
+#   2. Model reasons, then calls the crop tool on a region of that image.
+#   3. Agent returns the cropped region as a new image in a user turn.
+#   4. Model reads the crop and emits a final assistant message.
+#   5. Teacher scores every student token, including the ones generated after
+#      the crop was spliced in, so it conditions on a student prefix plus an
+#      environment image rather than on its own generation.
+#
+# Shape (10 nodes × 8 GPUs, non-colocated):
+#   - Node 1:     vLLM generation, 2 × TP=4
+#   - Node 2:     Super teacher logprobs, TP=8, EP=8
+#   - Nodes 3-10: Megatron policy training, TP=8, EP=64, CP=2, PP=1
+# expert_model_parallel_size must equal the training GPU count for the 512
+# experts to shard: EP=16, 32, 64 for 2, 4, 8 training nodes.
+#
+# Both teacher aliases point at the student checkpoint, so this is
+# self-distillation: the OPD advantage sits near zero and the recipe doubles as
+# a plumbing check. The LLM MOPD nightly uses the same trick. Point either alias
+# at a stronger Omni checkpoint for real distillation.
+#
+# Data: NeMo-Gym JSONL whose rows select image_tools_simple_agent and carry the
+# source image in responses_create_params. Set data.{train,validation}.data_path.
+#
+# Not yet on this branch:
+#   - nemo_rl/environments/image_tools_gym_tool.py, imported by the Gym agent
+#   - image_zoom_agent in the pinned NeMo-Gym
+#   - Megatron-Bridge handling for refitting a Super VL checkpoint trained with
+#     mtp_num_layers=0 (see NRL_REFIT_SKIP_MTP in the launcher)
+#
+# Run with:
+#   uv run --locked --no-sync examples/nemo_gym/run_multimodal_grpo_nemo_gym.py \
+#     --config examples/nemo_gym/mopd_nemotron_omni_super_image_tools.yaml
+# or examples/nemo_gym/run_super_mopd_image_tools.sh for the Slurm path.
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: results/mopd-nemotron-omni-super-image-tools
+  # Validation is off below, so there is no val metric to rank on; keep the
+  # most recent checkpoints instead of a best-of set.
+  metric_name: null
+  higher_is_better: true
+  keep_top_k: 2
+  save_period: 10
+  checkpoint_must_save_by: "00:03:45:00"
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 10  # 1 generation + 1 teacher + 8 policy train
+
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8
+  # One crop call plus the final answer needs 3 turns.
+  max_rollout_turns: 3
+  max_num_epochs: 2
+  max_num_steps: 300
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  advantage_clip_low: -50
+  advantage_clip_high: 50
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  overlong_filtering: false
+  zero_variance_prompt_filtering: false
+  max_val_samples: null
+  val_batch_size: 256
+  seed: 42
+  seq_logprob_error_threshold: 2
+  use_dynamic_sampling: false
+  batch_multiplier: 1
+  deduplicate_multimodal_data: false
+  reward_shaping:
+    enabled: false
+    overlong_buffer_length: 512
+    overlong_buffer_penalty: 1
+    max_response_length: ${policy.max_total_sequence_length}
+  reward_scaling:
+    enabled: false
+    source_min: 0.0
+    source_max: 1.0
+    target_min: 0.0
+    target_max: 1.0
+  async_grpo:
+    # Trajectories are at most one step stale and weights update in flight.
+    enabled: true
+    max_trajectory_age_steps: 1
+    in_flight_weight_updates: true
+    recompute_kv_cache_after_weight_updates: false
+  debug_snapshot_error_threshold: 1000000
+
+  adv_estimator:
+    name: opd
+
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  reference_policy_kl_type: k3
+  kl_input_clamp_value: null
+  kl_output_clamp_value: null
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.28
+  ratio_clip_c: null
+  use_on_policy_kl_approximation: true
+  disable_ppo_ratio: true
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_ratio: 5.0
+  truncated_importance_sampling_ratio_min: 0.2
+  truncated_importance_sampling_type: icepop
+  sequence_level_importance_ratios: false
+  token_level_loss: false
+  force_on_policy_ratio: false
+  use_kl_in_reward: false
+  use_sequence_length_scaling: false
+
+policy:
+  is_vlm: true
+  # HF export of the Super Omni tool-calling SFT checkpoint. Override on the
+  # CLI or via MODEL_NAME in the launcher.
+  model_name: /path/to/super_omni_toolcalls_hf
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template: "${policy.model_name}/chat_template.jinja"
+
+  train_global_batch_size: 64
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 16384
+  precision: "bfloat16"
+  logprob_chunk_size: 2048
+  offload_optimizer_for_logprob: false
+
+  dtensor_cfg:
+    enabled: false
+
+  dynamic_batching:
+    enabled: false
+
+  make_sequence_length_divisible_by: ${policy.megatron_cfg.tensor_model_parallel_size}
+  max_grad_norm: 1.0
+
+  sequence_packing:
+    enabled: True
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.train_micro_batch_size}}
+    logprob_mb_tokens: ${mul:${policy.max_total_sequence_length}, ${policy.logprob_batch_size}}
+    algorithm: "modified_first_fit_decreasing"
+    sequence_length_round: 64
+
+  optimizer: null
+  scheduler: null
+
+  megatron_cfg:
+    enabled: true
+    empty_unused_memory_level: 2
+    activation_checkpointing: true
+    tensor_model_parallel_size: 8
+    expert_model_parallel_size: 64
+    expert_tensor_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    context_parallel_size: 2
+    # Keep the non-colocated refit update collective source-only for SuperV3.
+    # Full policy-rank + vLLM-worker nccl4py collectives reproduced hangs and
+    # silent tensor corruption at this scale. Rank 0 is the only broadcast
+    # source, so other policy ranks stay out of that update comm while still
+    # participating in Megatron gathers that materialize rank-0 tensors.
+    refit_comm_src_only: true
+    # Known-good packed refit buffer ratio from the handoff. The bad regime was
+    # around 0.002 (~171 MB messages); 0.006 avoided that wedge while keeping
+    # buffers smaller than the generic 0.02 default.
+    refit_buffer_memory_ratio: 0.006
+    pipeline_dtype: ${policy.precision}
+    sequence_parallel: true
+
+    freeze_moe_router: true
+    moe_router_dtype: "fp32"
+    moe_router_load_balancing_type: "none"
+    moe_router_bias_update_rate: 1e-3
+    moe_router_enable_expert_bias: true
+    moe_permute_fusion: true
+    moe_enable_deepep: false
+    moe_token_dispatcher_type: "alltoall"
+    # Off in every Super launcher since the handoff; not re-tested here.
+    moe_shared_expert_overlap: false
+    moe_aux_loss_coeff: 0.0
+    track_moe_metrics: true
+    moe_per_layer_logging: false
+
+    apply_rope_fusion: true
+    bias_activation_fusion: false
+    defer_fp32_logits: true
+    # Train with MTP off. The Super HF export ships only 16 of the 512 experts
+    # for the MTP layer, so a refit that includes mtp.* builds export tasks that
+    # are asymmetric across expert-parallel ranks and wedges. vLLM keeps its own
+    # MTP weights for speculative decoding; see NRL_REFIT_SKIP_MTP in the
+    # launcher. The remaining mtp_* keys are inert at 0 layers but the Megatron
+    # config validator wants them set.
+    mtp_num_layers: 0
+    mtp_use_repeated_layer: false
+    mtp_detach_heads: true
+    mtp_loss_scaling_factor: 0.0
+    freeze_mtp: false
+
+    radio_force_cpe_eval_mode: true
+    freeze_vision_encoder: false
+    freeze_vision_projector: false
+    freeze_audio_encoder: true
+    freeze_audio_projector: true
+
+    optimizer:
+      optimizer: "adam"
+      lr: 3e-6
+      min_lr: 2e-9
+      weight_decay: 0.0
+      bf16: true
+      fp16: false
+      params_dtype: "float32"
+      adam_beta1: 0.9
+      adam_beta2: 0.99
+      adam_eps: 1e-8
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      clip_grad: ${policy.max_grad_norm}
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0
+
+    scheduler:
+      start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      weight_decay_incr_style: "constant"
+      lr_decay_style: "constant"
+      lr_decay_iters: null
+      lr_warmup_iters: 0
+      lr_warmup_init: 0.3e-7
+
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      average_in_collective: false
+      use_custom_fsdp: false
+      data_parallel_sharding_strategy: "optim_grads_params"
+
+    # GRPO applies these before worker groups are created, so the policy and
+    # the vLLM refit workers end up with the same NCCL settings.
+    env_vars:
+      NCCL_ALGO: Ring
+      NCCL_PROTO: Simple
+
+  generation:
+    backend: "vllm"
+    max_new_tokens: ${policy.max_total_sequence_length}
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    vllm_cfg:
+      # Required by grpo.async_grpo above: the async pathway drives generation
+      # through the async engine's HTTP server.
+      async_engine: true
+      kv_cache_dtype: auto
+      precision: ${policy.precision}
+      tensor_parallel_size: 4
+      pipeline_parallel_size: 1
+      expert_parallel_size: 1
+      gpu_memory_utilization: 0.8
+      max_model_len: ${policy.max_total_sequence_length}
+      load_format: auto
+      enforce_eager: false
+      use_deep_gemm: false
+      num_last_layers_in_bf16: 0
+      num_first_layers_in_bf16: 0
+      skip_tokenizer_init: false
+      expose_http_server: true
+      # Untested with Super at this scale; leave off until a smoke says
+      # otherwise. Not related to the cudagraph crash handled below.
+      enable_prefix_caching: false
+      http_server_serving_chat_kwargs:
+        chat_template: ${policy.tokenizer.chat_template}
+        chat_template_content_format: openai
+        enable_auto_tools: true
+        tool_parser: qwen3_coder
+        reasoning_parser: deepseek_r1
+    vllm_kwargs:
+      limit_mm_per_prompt: {"image": 8}
+      max_num_batched_tokens: ${policy.max_total_sequence_length}
+      max_num_seqs: 32
+      mamba_ssm_cache_dtype: "float32"
+      skip_mm_profiling: true
+      # FULL cudagraph replay reproduced CUDA illegal-instruction crashes with
+      # SuperV3 MTP + bad_words. PIECEWISE keeps cudagraph acceleration but
+      # avoids the captured full-forward replay path that failed. Revisit only
+      # after an MTP+bad_words smoke passes with FULL/FULL_AND_PIECEWISE.
+      compilation_config:
+        cudagraph_mode: PIECEWISE
+      speculative_config:
+        method: mtp
+        num_speculative_tokens: 0
+    colocated:
+      # Generation runs on its own node so the teacher and the policy are not
+      # competing with vLLM for memory. Two TP4 engines fill the node.
+      enabled: false
+      resources:
+        gpus_per_node: 8
+        num_nodes: 1
+
+logger:
+  log_dir: "logs/mopd-nemotron-omni-super-image-tools"
+  num_val_samples_to_print: 0
+  wandb_enabled: true
+  tensorboard_enabled: true
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  debug_payload_metrics: false
+  wandb:
+    project: "mopd-nemotron-omni-super"
+    name: "mopd-nemotron-omni-super-image-tools"
+  tensorboard: {}
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: False
+  num_workers: 1
+  # NeMo-Gym JSONL rows whose agent_ref selects image_tools_simple_agent and
+  # whose responses_create_params carry the source image. Override both paths
+  # on the CLI or via DATA_PATH in the launcher.
+  train:
+    data_path: /path/to/image_tools_mopd_train.jsonl
+  validation:
+    data_path: /path/to/image_tools_mopd_train.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: "nemo_gym"
+    prompt_file: null
+    system_prompt_file: null
+    processor: "nemo_gym_data_processor"
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  nemo_gym:
+    policy_max_input_tokens: ${policy.max_total_sequence_length}
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    - resources_servers/mcqa/configs/mcqa.yaml
+    - resources_servers/gui_coordinate/configs/gui_coordinate.yaml
+    - resources_servers/string_match/configs/string_match.yaml
+    - responses_api_agents/image_zoom_agent/configs/image_tools_agent.yaml
+    math_with_judge:
+      resources_servers:
+        math_with_judge:
+          judge_model_server:
+            name: policy_model
+          should_use_judge: false
+    code_gen:
+      resources_servers:
+        code_gen:
+          num_processes: 1024
+          unit_test_timeout_secs: 10
+          debug: false
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          uses_reasoning_parser: true
+          max_input_tokens: ${policy.max_total_sequence_length}
+          extra_body:
+            bad_words: ["<image>", "<img>", "</img>", "<so_embedding>", "<so_start>", "<so_end>"]
+            chat_template_kwargs:
+              enable_thinking: true
+
+# Two aliases because a row can address either the default teacher or the
+# image-tools agent by name. While both point at the same path,
+# deduplicate_shared_teacher_checkpoints collapses them into one loaded teacher.
+on_policy_distillation:
+  enabled: true
+  use_orm_advantage: false
+  orm_advantage_weight: 0.0
+  teacher_model_by_agent_name:
+    super_teacher: ${policy.model_name}
+    image_tools_simple_agent: ${policy.model_name}
+  default_teacher_alias: super_teacher
+  strict_agent_name_match: true
+  deduplicate_shared_teacher_checkpoints: true
+  non_colocated_teachers:
+    enabled: true
+    default_teacher_cfg:
+      tensor_model_parallel_size: 8
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      context_parallel_size: 1
+      num_nodes: 1
+      gpus_per_node: 8
+      precision: bf16
+      micro_batch_size: 1
+      moe_shared_expert_overlap: false
