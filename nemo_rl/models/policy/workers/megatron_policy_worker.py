@@ -305,7 +305,10 @@ class MegatronPolicyWorkerImpl(
         del bundle_indices  # one GPU per worker; no per-bundle seeding needed
         del num_gpus_per_node  # not needed; one GPU per worker
         resources: dict[str, Any] = {"num_gpus": num_gpus}
-        env_vars: dict[str, str] = {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
+        env_vars: dict[str, str] = {
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        }
         init_kwargs: dict[str, Any] = {}
         return resources, env_vars, init_kwargs, {}
 
