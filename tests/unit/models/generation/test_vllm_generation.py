@@ -1853,6 +1853,30 @@ def test_vllm_deferred_model_load(cluster, tokenizer):
     vllm_generation.shutdown()
 
 
+def test_vllm_router_url_overrides_dp_urls():
+    generation = object.__new__(VllmGeneration)
+    generation.dp_openai_server_base_urls = [
+        "http://worker-0.example.com/v1",
+        "http://worker-1.example.com/v1",
+    ]
+
+    generation.router_url = "http://router.example.com"
+    assert generation.openai_server_base_urls() == [
+        "http://router.example.com/v1"
+    ]
+
+    generation.router_url = "http://router.example.com/v1"
+    assert generation.openai_server_base_urls() == [
+        "http://router.example.com/v1"
+    ]
+
+    generation.router_url = None
+    assert generation.openai_server_base_urls() == [
+        "http://worker-0.example.com/v1",
+        "http://worker-1.example.com/v1",
+    ]
+
+
 def test_VllmAsyncGenerationWorker_replace_prefix_tokens(tokenizer):
     # This test assumes the tokenizer model is for the Qwen 3 family
     eos_token_id = tokenizer.eos_token_id
