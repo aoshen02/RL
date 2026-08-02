@@ -41,6 +41,22 @@ logger:
     log_nemo_gym_full_result_tables: false
 ```
 
+### Using an external vLLM Router
+
+Start the Router after the NeMo RL workers are healthy, and pass the Router
+origin in `policy.generation.vllm_cfg.router_url`:
+
+```bash
+vllm-router --host 0.0.0.0 --port 8000 \
+  --worker-urls http://worker-0:8000 http://worker-1:8000 \
+  --policy round_robin
+```
+
+Each worker must enable `expose_http_server: true`; NeMo RL continues to own
+those Ray workers and performs refit/sleep/wake operations. The Router is only
+the HTTP request dispatcher. `router_url` may be either the Router origin or
+its `/v1` base URL.
+
 When `log_nemo_gym_full_result_tables` is `false`, NeMo RL does not construct
 the per-agent `full_result` Tables. This prevents those payloads from entering
 the async replay buffer and avoids uploading them to W&B. Numeric per-agent
