@@ -166,7 +166,7 @@ def test_rollout_only_bypasses_single_controller_setup(
         lambda: (Namespace(config="config.yaml", debug_rollout_only=True), []),
     )
     setup_single_controller = MagicMock()
-    run_rollout_only = MagicMock()
+    maybe_run_rollout_only = MagicMock(return_value=True)
     monkeypatch.setattr(
         run_grpo_single_controller,
         "setup_single_controller",
@@ -179,14 +179,15 @@ def test_rollout_only_bypasses_single_controller_setup(
     )
     monkeypatch.setattr(
         run_grpo_single_controller,
-        "run_rollout_only",
-        run_rollout_only,
+        "maybe_run_rollout_only",
+        maybe_run_rollout_only,
     )
 
     run_grpo_single_controller.main()
 
     setup_single_controller.assert_not_called()
-    run_rollout_only.assert_called_once_with(
+    maybe_run_rollout_only.assert_called_once_with(
+        Namespace(config="config.yaml", debug_rollout_only=True),
         main_context.config,
         "dataset",
         "tokenizer",

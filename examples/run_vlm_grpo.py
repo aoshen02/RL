@@ -23,7 +23,7 @@ from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
-from nemo_rl.experience.rollouts import run_rollout_only
+from nemo_rl.experience.rollout_only import maybe_run_rollout_only
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
     add_debug_rollout_only_argument,
@@ -112,10 +112,9 @@ def main() -> None:
             processor, config.data, config.env, is_vlm=True
         )
 
-    if args.debug_rollout_only:
-        run_rollout_only(
-            config, dataset, processor.tokenizer, task_to_env, config.grpo
-        )
+    if maybe_run_rollout_only(
+        args, config, dataset, processor.tokenizer, task_to_env, config.grpo
+    ):
         return
 
     with rl_init_timer.time("setup"):

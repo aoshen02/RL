@@ -28,7 +28,7 @@ from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer, set_seed
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType
 from nemo_rl.distributed.virtual_cluster import init_ray
-from nemo_rl.experience.rollouts import run_rollout_only
+from nemo_rl.experience.rollout_only import maybe_run_rollout_only
 from nemo_rl.environments.games.sliding_puzzle import (
     SlidingPuzzleConfig,
     SlidingPuzzleEnv,
@@ -260,8 +260,9 @@ def main():
             add_system_prompt=config.data["add_system_prompt"],
         )
 
-    if args.debug_rollout_only:
-        run_rollout_only(config, dataset, tokenizer, task_to_env, config.grpo)
+    if maybe_run_rollout_only(
+        args, config, dataset, tokenizer, task_to_env, config.grpo
+    ):
         return
 
     with rl_init_timer.time("setup"):

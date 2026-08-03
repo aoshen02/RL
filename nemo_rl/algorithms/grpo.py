@@ -1940,35 +1940,10 @@ def _apply_configured_message_level_advantage_penalties(
 
 
 def _should_use_async_rollouts(master_config: MasterConfig) -> bool:
-    """Determine if async rollouts should be used based on the configuration.
+    """Determine whether the configured generation backend is asynchronous."""
+    from nemo_rl.experience.rollout_only import should_use_async_rollouts
 
-    SGLang only uses async rollouts when explicitly configured with
-    ``policy.generation.use_async_rollouts``. vLLM and Megatron use async
-    rollouts when their respective ``async_engine`` config is enabled.
-    """
-    generation_config = master_config.policy["generation"]
-    if generation_config is None:
-        return False
-    backend = generation_config.get("backend", "")
-
-    if backend == "sglang":
-        return bool(generation_config.get("use_async_rollouts", False))
-
-    if backend == "vllm":
-        return bool(generation_config.get("vllm_cfg", {}).get("async_engine", False))
-
-    if backend == "trtllm":
-        assert generation_config.get("trtllm_cfg", {}).get("async_engine", False), (
-            "TRT-LLM backend requires trtllm_cfg.async_engine=true; the "
-            "synchronous engine path (async_engine=false) is no longer supported."
-        )
-        return True
-
-    if backend == "megatron":
-        mcore_cfg = generation_config.get("mcore_generation_config", {})
-        return mcore_cfg.get("async_engine", False)
-
-    return False
+    return should_use_async_rollouts(master_config.policy["generation"])
 
 
 def _preserve_router_replay_routed_experts(
