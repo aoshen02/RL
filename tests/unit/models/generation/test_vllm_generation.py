@@ -190,6 +190,7 @@ def _install_fake_vllm_openai_modules(monkeypatch):
         "vllm.entrypoints",
         "vllm.entrypoints.openai",
         "vllm.entrypoints.openai.chat_completion",
+        "vllm.entrypoints.openai.completion",
         "vllm.entrypoints.openai.engine",
         "vllm.entrypoints.openai.models",
         "vllm.entrypoints.serve",
@@ -230,6 +231,13 @@ def _install_fake_vllm_openai_modules(monkeypatch):
             self.kwargs = kwargs
             self.instances.append(self)
 
+    class OpenAIServingCompletion:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def create_completion(self, *_args, **_kwargs):
+            return None
+
     class ServingTokenization:
         instances = []
 
@@ -254,6 +262,15 @@ def _install_fake_vllm_openai_modules(monkeypatch):
     make_module(
         "vllm.entrypoints.openai.chat_completion.serving",
         OpenAIServingChat=OpenAIServingChat,
+    )
+    make_module(
+        "vllm.entrypoints.openai.completion.protocol",
+        CompletionRequest=type("CompletionRequest", (), {}),
+        CompletionResponse=type("CompletionResponse", (), {}),
+    )
+    make_module(
+        "vllm.entrypoints.openai.completion.serving",
+        OpenAIServingCompletion=OpenAIServingCompletion,
     )
     make_module(
         "vllm.entrypoints.openai.engine.protocol",
@@ -299,6 +316,13 @@ class _FakeFastAPIApp:
         self.routes = []
 
     def post(self, path):
+        def decorator(func):
+            self.routes.append((path, func))
+            return func
+
+        return decorator
+
+    def get(self, path):
         def decorator(func):
             self.routes.append((path, func))
             return func
