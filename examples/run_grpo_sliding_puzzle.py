@@ -37,10 +37,10 @@ from nemo_rl.environments.games.sliding_puzzle import (
 )
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
-    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
+    rollout_only_requested,
 )
 from nemo_rl.utils.logger import get_next_experiment_dir, log_container_init_timing
 from nemo_rl.utils.timer import Timer
@@ -52,7 +52,6 @@ def parse_args():
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
-    add_debug_rollout_only_argument(parser)
     args, overrides = parser.parse_known_args()
     return args, overrides
 
@@ -218,9 +217,10 @@ def main():
             print(f"Overrides: {overrides}")
             config = parse_hydra_overrides(config, overrides)
 
-        config = OmegaConf.to_container(config, resolve=True)
-        config = MasterConfig(**config)
-        print("Applied CLI overrides")
+    config = OmegaConf.to_container(config, resolve=True)
+    config = MasterConfig(**config)
+    rollout_only = rollout_only_requested(config)
+    print("Applied CLI overrides")
 
     # Print config
     print("Final config:")
@@ -242,7 +242,7 @@ def main():
     with rl_init_timer.time("tokenizer"):
         tokenizer = get_tokenizer(config.policy["tokenizer"])
     config.policy["generation"] = configure_generation_config(
-        config.policy["generation"], tokenizer, is_eval=args.debug_rollout_only
+        config.policy["generation"], tokenizer, is_eval=rollout_only
     )
 
     with rl_init_timer.time("data"):
@@ -260,7 +260,7 @@ def main():
             add_system_prompt=config.data["add_system_prompt"],
         )
 
-    if args.debug_rollout_only:
+    if rollout_only:
         run_rollout_only(config, dataset, tokenizer, task_to_env, config.grpo)
         return
 

@@ -45,10 +45,10 @@ from nemo_rl.environments.nemo_gym import setup_nemo_gym_config
 from nemo_rl.experience.rollouts import run_nemo_gym_rollout_sync, run_rollout_only
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
-    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
+    rollout_only_requested,
 )
 from nemo_rl.utils.logger import get_next_experiment_dir, log_container_init_timing
 from nemo_rl.utils.timer import Timer
@@ -60,7 +60,6 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
-    add_debug_rollout_only_argument(parser)
 
     # Parse known args for the script
     args, overrides = parser.parse_known_args()
@@ -143,6 +142,7 @@ def main() -> None:
 
         config = OmegaConf.to_container(config, resolve=True)
         config = MasterConfig(**config)
+        rollout_only = rollout_only_requested(config)
         print("Applied CLI overrides")
 
     # Get the next experiment directory with incremented ID
@@ -170,7 +170,7 @@ def main() -> None:
         config.policy["generation"] = configure_generation_config(
             config.policy["generation"],
             tokenizer,
-            is_eval=args.debug_rollout_only,
+            is_eval=rollout_only,
             has_refit_draft_weights=has_refit_draft_weights,
             trains_mtp=trains_mtp,
         )
@@ -188,10 +188,10 @@ def main() -> None:
             tokenizer, config.data, env_configs=None
         )
 
-    if args.debug_rollout_only:
+    if rollout_only:
         with rl_init_timer.time("ray_connect"):
             init_ray()
-    if args.debug_rollout_only:
+    if rollout_only:
         run_rollout_only(
             config,
             train_dataset,
