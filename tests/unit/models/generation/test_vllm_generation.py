@@ -19,6 +19,7 @@ import sys
 import types
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -1883,6 +1884,10 @@ def test_vllm_router_url_overrides_dp_urls():
         "http://worker-0.example.com/v1",
         "http://worker-1.example.com/v1",
     ]
+    generation.weight_synchronizer = None
+    generation.worker_group = SimpleNamespace(
+        shutdown=lambda cleanup_method: True
+    )
 
     generation.router_url = "http://router.example.com"
     assert generation.openai_server_base_urls() == ["http://router.example.com/v1"]
