@@ -20,7 +20,7 @@ import types
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import ray
@@ -1885,9 +1885,7 @@ def test_vllm_router_url_overrides_dp_urls():
         "http://worker-1.example.com/v1",
     ]
     generation.weight_synchronizer = None
-    generation.worker_group = SimpleNamespace(
-        shutdown=lambda cleanup_method: True
-    )
+    generation.worker_group = SimpleNamespace(shutdown=lambda cleanup_method: True)
 
     generation.router_url = "http://router.example.com"
     assert generation.openai_server_base_urls() == ["http://router.example.com/v1"]
@@ -1900,6 +1898,74 @@ def test_vllm_router_url_overrides_dp_urls():
         "http://worker-0.example.com/v1",
         "http://worker-1.example.com/v1",
     ]
+
+
+def test_vllm_managed_router_command():
+    generation = object.__new__(VllmGeneration)
+    generation.cfg = {"vllm_cfg": {"router_binary": "/opt/bin/vllm-router"}}
+    generation.weight_synchronizer = None
+    generation.worker_group = SimpleNamespace(shutdown=lambda cleanup_method: True)
+    generation.dp_openai_server_base_urls = [
+        "http://worker-0:8000/v1",
+        "http://worker-1:8000/v1",
+    ]
+    generation._router_port = 18080
+    generation._router_prometheus_port = 18081
+    generation.router_policy = "consistent_hash"
+    generation.router_request_id_header = "X-Session-ID"
+
+    assert generation._router_command() == [
+        "/opt/bin/vllm-router",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "18080",
+        "--prometheus-host",
+        "0.0.0.0",
+        "--prometheus-port",
+        "18081",
+        "--worker-urls",
+        "http://worker-0:8000",
+        "http://worker-1:8000",
+        "--policy",
+        "consistent_hash",
+        "--request-id-headers",
+        "X-Session-ID",
+    ]
+
+
+def test_vllm_managed_router_lifecycle(tmp_path):
+    generation = object.__new__(VllmGeneration)
+    generation.cfg = {"vllm_cfg": {"router_binary": "vllm-router"}}
+    generation.dp_openai_server_base_urls = ["http://worker:8000/v1"]
+    generation._router_port = 18080
+    generation._router_prometheus_port = 18081
+    generation._router_log_path = tmp_path / "router.log"
+    generation._router_log_file = None
+    generation._router_socket = MagicMock()
+    generation._router_metrics_socket = MagicMock()
+    generation._router_process = None
+    generation.weight_synchronizer = None
+    generation.worker_group = SimpleNamespace(shutdown=lambda cleanup_method: True)
+    generation.router_url = "http://node:18080"
+    generation.router_policy = "round_robin"
+    generation.router_request_id_header = "x-request-id"
+    generation._wait_for_router = MagicMock()
+
+    process = MagicMock()
+    process.poll.return_value = None
+    with patch("subprocess.Popen", return_value=process) as popen:
+        generation._start_router()
+
+    popen.assert_called_once()
+    generation._wait_for_router.assert_called_once_with()
+    assert generation._router_log_path.exists()
+
+    generation._stop_router()
+    process.terminate.assert_called_once_with()
+    process.wait.assert_called_once_with(timeout=10)
+    assert generation._router_process is None
+    assert generation._router_log_file is None
 
 
 def test_VllmAsyncGenerationWorker_replace_prefix_tokens(tokenizer):

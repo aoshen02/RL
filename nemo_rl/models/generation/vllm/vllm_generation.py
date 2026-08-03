@@ -17,9 +17,14 @@ import base64
 import io
 import logging
 import os
+import socket
+import subprocess
+import sys
+import time
 import uuid
 import warnings
 from collections import defaultdict
+from pathlib import Path
 from typing import (
     Any,
     AsyncGenerator,
@@ -107,9 +112,26 @@ class VllmGeneration(GenerationInterface):
         # Store config
         self.cfg = config
         self.router_url = self.cfg["vllm_cfg"].get("router_url")
+        self.router_policy = self.cfg["vllm_cfg"].get("router_policy")
         self.router_request_id_header = self.cfg["vllm_cfg"].get(
             "router_request_id_header", "x-request-id"
         )
+        self._router_process: subprocess.Popen | None = None
+        self._router_log_file = None
+        self._router_socket: socket.socket | None = None
+        self._router_metrics_socket: socket.socket | None = None
+        self._router_port: int | None = None
+        self._router_prometheus_port: int | None = None
+        self._router_log_path: Path | None = None
+        if self.router_url and self.router_policy:
+            raise ValueError("router_url and router_policy are mutually exclusive")
+        if self.router_policy and (
+            not self.cfg["vllm_cfg"]["async_engine"]
+            or not self.cfg["vllm_cfg"].get("expose_http_server")
+        ):
+            raise ValueError(
+                "router_policy requires async_engine=true and expose_http_server=true"
+            )
         self._defer_model_load = defer_model_load
         self.weight_synchronizer: WeightSynchronizer | None = None
         self.tp_size = self.cfg["vllm_cfg"]["tensor_parallel_size"]
@@ -281,6 +303,11 @@ class VllmGeneration(GenerationInterface):
             self.dp_openai_server_base_urls = self._report_dp_openai_server_base_urls()
             self.device_uuids = self._report_device_id()
 
+        if self.router_policy:
+            self._reserve_router(name_prefix)
+            if not defer_model_load:
+                self._start_router()
+
         self._step_metrics_snapshot: dict[str | tuple[str, int], float] | None = None
 
     def openai_server_base_urls(self) -> list[str | None]:
@@ -293,6 +320,139 @@ class VllmGeneration(GenerationInterface):
         """Return the router's OpenAI-compatible ``/v1`` base URL."""
         base_url = self.router_url.rstrip("/")
         return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+    @staticmethod
+    def _reserve_tcp_port(port: int | None = None) -> tuple[socket.socket, int]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", port or 0))
+        sock.listen(1)
+        return sock, sock.getsockname()[1]
+
+    def _reserve_router(self, name_prefix: str) -> None:
+        """Reserve Router and metrics ports before NeMo-Gym starts."""
+        from nemo_rl.distributed.virtual_cluster import _get_node_ip_local
+
+        self._router_socket, self._router_port = self._reserve_tcp_port(
+            self.cfg["vllm_cfg"].get("router_port")
+        )
+        self._router_metrics_socket, self._router_prometheus_port = (
+            self._reserve_tcp_port(self.cfg["vllm_cfg"].get("router_prometheus_port"))
+        )
+        self.router_url = f"http://{_get_node_ip_local()}:{self._router_port}"
+        default_log = f"vllm-router-{name_prefix}-{self.router_policy}.log"
+        self._router_log_path = Path(
+            self.cfg["vllm_cfg"].get("router_log_path", default_log)
+        ).absolute()
+
+    def _router_command(self) -> list[str]:
+        worker_urls = []
+        for base_url in self.dp_openai_server_base_urls:
+            if base_url is None:
+                raise RuntimeError("vLLM Router requires HTTP worker URLs")
+            worker_urls.append(base_url.removesuffix("/v1").rstrip("/"))
+
+        binary = self.cfg["vllm_cfg"].get("router_binary")
+        command = (
+            [binary] if binary else [sys.executable, "-m", "vllm_router.launch_router"]
+        )
+        return command + [
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(self._router_port),
+            "--prometheus-host",
+            "0.0.0.0",
+            "--prometheus-port",
+            str(self._router_prometheus_port),
+            "--worker-urls",
+            *worker_urls,
+            "--policy",
+            str(self.router_policy),
+            "--request-id-headers",
+            self.router_request_id_header,
+        ]
+
+    def _start_router(self) -> None:
+        """Start the managed Router after all backend servers are healthy."""
+        if not self.router_policy or self._router_process is not None:
+            return
+        assert self._router_log_path is not None
+        command = self._router_command()
+
+        for sock in (self._router_socket, self._router_metrics_socket):
+            if sock is not None:
+                sock.close()
+        self._router_socket = self._router_metrics_socket = None
+
+        self._router_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._router_log_file = self._router_log_path.open("a")
+        try:
+            self._router_process = subprocess.Popen(
+                command,
+                stdout=self._router_log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            self._wait_for_router()
+        except Exception:
+            self._stop_router()
+            raise
+        print(
+            f"vLLM Router ready: policy={self.router_policy}, "
+            f"url={self.router_url}, log={self._router_log_path}",
+            flush=True,
+        )
+
+    def _wait_for_router(self, timeout_s: float = 600) -> None:
+        import http.client
+
+        assert self._router_process is not None
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            return_code = self._router_process.poll()
+            if return_code is not None:
+                raise RuntimeError(
+                    f"vLLM Router exited with code {return_code}; "
+                    f"see {self._router_log_path}"
+                )
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self._router_port, timeout=1
+                )
+                connection.request("GET", "/health")
+                response = connection.getresponse()
+                connection.close()
+                if response.status == 200:
+                    return
+            except (OSError, http.client.HTTPException):
+                pass
+            time.sleep(0.25)
+        raise TimeoutError(
+            f"vLLM Router did not become healthy in {timeout_s}s; "
+            f"see {self._router_log_path}"
+        )
+
+    def _stop_router(self) -> None:
+        process = getattr(self, "_router_process", None)
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+            self._router_process = None
+        for attr in ("_router_socket", "_router_metrics_socket"):
+            sock = getattr(self, attr, None)
+            if sock is not None:
+                sock.close()
+                setattr(self, attr, None)
+        log_file = getattr(self, "_router_log_file", None)
+        if log_file is not None:
+            log_file.close()
+            self._router_log_file = None
 
     def _get_tied_worker_bundle_indices(
         self, cluster: RayVirtualCluster
@@ -533,6 +693,8 @@ class VllmGeneration(GenerationInterface):
 
         # Save device UUIDs
         self.device_uuids = self._report_device_id()
+
+        self._start_router()
 
     def _post_init(self):
         # Choose the appropriate method based on async_engine setting
@@ -1040,10 +1202,15 @@ class VllmGeneration(GenerationInterface):
     def shutdown(self) -> bool:
         """Shut down all vLLM workers and clean up resources."""
         try:
-            if self.weight_synchronizer is not None:
-                self.weight_synchronizer.shutdown()
+            self._stop_router()
+            weight_synchronizer = getattr(self, "weight_synchronizer", None)
+            if weight_synchronizer is not None:
+                weight_synchronizer.shutdown()
             # Use the worker group's shutdown method with the worker's cleanup method
-            return self.worker_group.shutdown(cleanup_method="shutdown")
+            worker_group = getattr(self, "worker_group", None)
+            if worker_group is None:
+                return True
+            return worker_group.shutdown(cleanup_method="shutdown")
         except ray.exceptions.RayActorError:
             # Workers already dead (e.g., shut down via another handle to the same actors).
             return True

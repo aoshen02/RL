@@ -65,6 +65,20 @@ class VllmSpecificArgs(TypedDict):
     # Optional external vLLM Router origin (or origin/v1). Ray still owns
     # worker lifecycle/refit; rollout requests use this endpoint when set.
     router_url: NotRequired[str]
+    # Start and manage a local vLLM Router over the Ray-owned HTTP workers.
+    router_policy: NotRequired[
+        Literal[
+            "random",
+            "round_robin",
+            "cache_aware",
+            "power_of_two",
+            "consistent_hash",
+        ]
+    ]
+    router_binary: NotRequired[str]
+    router_port: NotRequired[int]
+    router_prometheus_port: NotRequired[int]
+    router_log_path: NotRequired[str]
     router_request_id_header: NotRequired[str]
 
 

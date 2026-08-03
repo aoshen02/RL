@@ -41,21 +41,28 @@ logger:
     log_nemo_gym_full_result_tables: false
 ```
 
-### Using an external vLLM Router
+### Using vLLM Router
 
-Start the Router after the NeMo RL workers are healthy, and pass the Router
-origin in `policy.generation.vllm_cfg.router_url`:
+Set `policy.generation.vllm_cfg.router_policy` to let NeMo RL reserve the
+Router endpoint before NeMo-Gym starts, then launch the Router after its
+Ray-owned vLLM HTTP workers are healthy:
 
-```bash
-vllm-router --host 0.0.0.0 --port 8000 \
-  --worker-urls http://worker-0:8000 http://worker-1:8000 \
-  --policy round_robin
+```yaml
+policy:
+  generation:
+    vllm_cfg:
+      async_engine: true
+      expose_http_server: true
+      router_policy: cache_aware
+      router_log_path: /path/to/run/router.stdout.log
 ```
 
-Each worker must enable `expose_http_server: true`; NeMo RL continues to own
-those Ray workers and performs refit/sleep/wake operations. The Router is only
-the HTTP request dispatcher. `router_url` may be either the Router origin or
-its `/v1` base URL.
+Policies are `random`, `round_robin`, `cache_aware`, `power_of_two`, and
+`consistent_hash`. NeMo RL owns the Router process and stops it before the
+workers; its stdout and stderr are persisted at `router_log_path`.
+
+For an externally managed Router, set `router_url` to its origin or `/v1`
+base URL instead. `router_url` and `router_policy` are mutually exclusive.
 
 When `log_nemo_gym_full_result_tables` is `false`, NeMo RL does not construct
 the per-agent `full_result` Tables. This prevents those payloads from entering
