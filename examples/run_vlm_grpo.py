@@ -23,8 +23,10 @@ from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
+from nemo_rl.experience.rollouts import run_debug_rollout_only
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
@@ -39,6 +41,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
+    add_debug_rollout_only_argument(parser)
     # Parse known args for the script
     args, overrides = parser.parse_known_args()
     return args, overrides
@@ -93,7 +96,9 @@ def main() -> None:
         "A generation config is required for GRPO"
     )
     config.policy["generation"] = configure_generation_config(
-        config.policy["generation"], processor.tokenizer
+        config.policy["generation"],
+        processor.tokenizer,
+        is_eval=args.debug_rollout_only,
     )
     if "vllm_cfg" in config.policy["generation"]:
         assert (
@@ -106,6 +111,12 @@ def main() -> None:
         dataset, val_dataset, task_to_env, val_task_to_env = setup_response_data(
             processor, config.data, config.env, is_vlm=True
         )
+
+    if args.debug_rollout_only:
+        run_debug_rollout_only(
+            config, dataset, processor.tokenizer, task_to_env, config.grpo
+        )
+        return
 
     with rl_init_timer.time("setup"):
         (

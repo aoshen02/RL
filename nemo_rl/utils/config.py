@@ -12,12 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 from pathlib import Path
 from typing import Optional, Union, cast
 
 from hydra._internal.config_loader_impl import ConfigLoaderImpl
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import DictConfig, ListConfig, OmegaConf
+
+
+def add_debug_rollout_only_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the common rollout-only debug flag to an online launcher."""
+    parser.add_argument(
+        "--debug-rollout-only",
+        action="store_true",
+        help="Run rollout steps without initializing training workers.",
+    )
 
 
 def resolve_path(base_path: Path, path: str) -> Path:

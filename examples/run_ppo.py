@@ -22,8 +22,10 @@ from nemo_rl.algorithms.ppo import MasterConfig, ppo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
+from nemo_rl.experience.rollouts import run_debug_rollout_only
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
@@ -37,6 +39,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
+    add_debug_rollout_only_argument(parser)
 
     # Parse known args for the script
     args, overrides = parser.parse_known_args()
@@ -86,7 +89,7 @@ def main() -> None:
         "A generation config is required for PPO"
     )
     config.policy["generation"] = configure_generation_config(
-        config.policy["generation"], tokenizer
+        config.policy["generation"], tokenizer, is_eval=args.debug_rollout_only
     )
 
     # setup data
@@ -96,6 +99,10 @@ def main() -> None:
         task_to_env,
         val_task_to_env,
     ) = setup_response_data(tokenizer, config.data, config.env)
+
+    if args.debug_rollout_only:
+        run_debug_rollout_only(config, dataset, tokenizer, task_to_env, config.ppo)
+        return
 
     (
         policy,

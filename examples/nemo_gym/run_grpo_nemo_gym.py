@@ -42,9 +42,13 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.environments.nemo_gym import setup_nemo_gym_config
-from nemo_rl.experience.rollouts import run_nemo_gym_rollout_sync
+from nemo_rl.experience.rollouts import (
+    run_debug_rollout_only,
+    run_nemo_gym_rollout_sync,
+)
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
@@ -59,6 +63,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
+    add_debug_rollout_only_argument(parser)
 
     # Parse known args for the script
     args, overrides = parser.parse_known_args()
@@ -168,6 +173,7 @@ def main() -> None:
         config.policy["generation"] = configure_generation_config(
             config.policy["generation"],
             tokenizer,
+            is_eval=args.debug_rollout_only,
             has_refit_draft_weights=has_refit_draft_weights,
             trains_mtp=trains_mtp,
         )
@@ -184,6 +190,20 @@ def main() -> None:
         train_dataset, val_dataset = setup_response_data(
             tokenizer, config.data, env_configs=None
         )
+
+    if args.debug_rollout_only:
+        with rl_init_timer.time("ray_connect"):
+            init_ray()
+        run_debug_rollout_only(
+            config,
+            train_dataset,
+            tokenizer,
+            None,
+            config.grpo,
+            use_nemo_gym=True,
+            reward_penalty_config=config.reward_penalties,
+        )
+        return
 
     # Validation dataset config setup.
     if config.grpo["max_val_samples"] is not None:

@@ -33,8 +33,10 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.environments.nemo_gym import setup_nemo_gym_config
+from nemo_rl.experience.rollouts import run_debug_rollout_only
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
@@ -50,6 +52,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
+    add_debug_rollout_only_argument(parser)
 
     # Parse known args for the script
     args, overrides = parser.parse_known_args()
@@ -94,7 +97,7 @@ def main() -> None:
 
     if config.policy["generation"] is not None:
         config.policy["generation"] = configure_generation_config(
-            config.policy["generation"], tokenizer
+            config.policy["generation"], tokenizer, is_eval=args.debug_rollout_only
         )
     else:
         raise ValueError(
@@ -113,6 +116,18 @@ def main() -> None:
     train_dataset, val_dataset = setup_response_data(
         tokenizer, config.data, env_configs=None
     )
+
+    if args.debug_rollout_only:
+        init_ray()
+        run_debug_rollout_only(
+            config,
+            train_dataset,
+            tokenizer,
+            None,
+            config.distillation,
+            use_nemo_gym=True,
+        )
+        return
 
     # Validation dataset config setup. Same Gym principle as run_grpo_nemo_gym.py:
     # max_val_samples is derived from len(val_dataset); user-set values are rejected.

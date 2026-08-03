@@ -11,13 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import argparse
 import tempfile
 from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
+from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
+    load_config,
+    register_omegaconf_resolvers,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ULTRA_CONFIG_PATHS = [
@@ -230,6 +235,15 @@ def test_add_resolver():
     config = OmegaConf.create({"value": "${add:2,3}"})
 
     assert config.value == 5
+
+
+def test_debug_rollout_only_argument_defaults_to_disabled():
+    """Online launchers opt into rollout-only mode explicitly."""
+    parser = argparse.ArgumentParser()
+    add_debug_rollout_only_argument(parser)
+
+    assert parser.parse_args([]).debug_rollout_only is False
+    assert parser.parse_args(["--debug-rollout-only"]).debug_rollout_only is True
 
 
 @pytest.mark.parametrize("config_path", ULTRA_CONFIG_PATHS)

@@ -28,6 +28,7 @@ from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
 from nemo_rl.algorithms.utils import get_tokenizer, set_seed
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType
 from nemo_rl.distributed.virtual_cluster import init_ray
+from nemo_rl.experience.rollouts import run_debug_rollout_only
 from nemo_rl.environments.games.sliding_puzzle import (
     SlidingPuzzleConfig,
     SlidingPuzzleEnv,
@@ -36,6 +37,7 @@ from nemo_rl.environments.games.sliding_puzzle import (
 )
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
@@ -50,6 +52,7 @@ def parse_args():
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
+    add_debug_rollout_only_argument(parser)
     args, overrides = parser.parse_known_args()
     return args, overrides
 
@@ -239,7 +242,7 @@ def main():
     with rl_init_timer.time("tokenizer"):
         tokenizer = get_tokenizer(config.policy["tokenizer"])
     config.policy["generation"] = configure_generation_config(
-        config.policy["generation"], tokenizer
+        config.policy["generation"], tokenizer, is_eval=args.debug_rollout_only
     )
 
     with rl_init_timer.time("data"):
@@ -256,6 +259,10 @@ def main():
             val_length=config.grpo["max_val_samples"],
             add_system_prompt=config.data["add_system_prompt"],
         )
+
+    if args.debug_rollout_only:
+        run_debug_rollout_only(config, dataset, tokenizer, task_to_env, config.grpo)
+        return
 
     with rl_init_timer.time("setup"):
         (
