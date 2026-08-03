@@ -1861,14 +1861,10 @@ def test_vllm_router_url_overrides_dp_urls():
     ]
 
     generation.router_url = "http://router.example.com"
-    assert generation.openai_server_base_urls() == [
-        "http://router.example.com/v1"
-    ]
+    assert generation.openai_server_base_urls() == ["http://router.example.com/v1"]
 
     generation.router_url = "http://router.example.com/v1"
-    assert generation.openai_server_base_urls() == [
-        "http://router.example.com/v1"
-    ]
+    assert generation.openai_server_base_urls() == ["http://router.example.com/v1"]
 
     generation.router_url = None
     assert generation.openai_server_base_urls() == [

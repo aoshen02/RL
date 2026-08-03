@@ -681,9 +681,7 @@ class VllmAsyncGenerationWorkerImpl(
         generation_config = self.cfg
 
         @app.post("/v1/completions")
-        async def create_completion(
-            request: CompletionRequest, raw_request: Request
-        ):
+        async def create_completion(request: CompletionRequest, raw_request: Request):
             # This endpoint is for native NeMo-RL router transport.  It keeps
             # the prompt pre-tokenized and returns token IDs/logprobs instead
             # of forcing a text round-trip through a chat template.

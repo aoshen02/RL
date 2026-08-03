@@ -29,6 +29,7 @@ from typing import (
 
 import numpy as np
 import ray
+import torch
 from ray.util.placement_group import PlacementGroup
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict, SlicedDataDict
