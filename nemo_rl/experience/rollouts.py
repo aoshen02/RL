@@ -61,6 +61,31 @@ from nemo_rl.utils.timer import Timer
 TokenizerType = PreTrainedTokenizerBase
 
 
+def should_use_async_rollouts(generation_config: GenerationConfig | None) -> bool:
+    """Return whether the configured generation backend uses async rollouts."""
+    if generation_config is None:
+        return False
+
+    backend = generation_config.get("backend", "")
+    if backend == "sglang":
+        return bool(generation_config.get("use_async_rollouts", False))
+    if backend == "vllm":
+        return bool(generation_config.get("vllm_cfg", {}).get("async_engine", False))
+    if backend == "trtllm":
+        assert generation_config.get("trtllm_cfg", {}).get("async_engine", False), (
+            "TRT-LLM backend requires trtllm_cfg.async_engine=true; the "
+            "synchronous engine path (async_engine=false) is no longer supported."
+        )
+        return True
+    if backend == "megatron":
+        return bool(
+            generation_config.get("mcore_generation_config", {}).get(
+                "async_engine", False
+            )
+        )
+    return False
+
+
 def _add_r3_fallback_metrics(
     gen_metrics: dict[str, float | int],
     generation_outputs: BatchedDataDict,
@@ -2587,3 +2612,187 @@ def _postprocess_single_nemo_gym_group(
         rollout_metrics=rollout_metrics,
         task_index=group_task_index,
     )
+
+
+def run_rollout_only(
+    master_config: Any,
+    dataset: Any,
+    tokenizer: TokenizerType,
+    task_to_env: dict[str, EnvironmentInterface] | None,
+    algorithm_config: dict[str, Any] | BaseModel,
+    *,
+    use_nemo_gym: bool = False,
+    effort_config: Any = None,
+    reward_penalty_config: dict[str, Any] | BaseModel | None = None,
+) -> None:
+    """Run the configured online rollout path without creating train workers.
+
+    This is the common entry point used by every online launcher.  It lives
+    beside the rollout primitives so the debug flag changes orchestration only;
+    the same sync, async, and NeMo-Gym drivers used by training are invoked.
+    """
+    from torchdata.stateful_dataloader import StatefulDataLoader
+
+    from nemo_rl.data.collate_fn import rl_collate_fn
+    from nemo_rl.models.generation import setup_generation_only
+    from nemo_rl.utils.logger import Logger
+
+    if master_config.data.get("use_multiple_dataloader") or isinstance(dataset, dict):
+        raise NotImplementedError(
+            "--debug-rollout-only requires one training dataloader."
+        )
+
+    generation_config = master_config.policy["generation"]
+    assert generation_config is not None, "A generation config is required"
+    algorithm_values = (
+        algorithm_config.model_dump()
+        if isinstance(algorithm_config, BaseModel)
+        else algorithm_config
+    )
+    required = (
+        "num_prompts_per_step",
+        "num_generations_per_prompt",
+        "max_num_steps",
+        "max_rollout_turns",
+    )
+    missing = [key for key in required if key not in algorithm_values]
+    if missing:
+        raise ValueError(
+            "--debug-rollout-only requires algorithm settings: " + ", ".join(missing)
+        )
+
+    dataloader = StatefulDataLoader(
+        dataset,
+        batch_size=algorithm_values["num_prompts_per_step"],
+        shuffle=master_config.data["shuffle"],
+        collate_fn=rl_collate_fn,
+        drop_last=True,
+        num_workers=master_config.data["num_workers"],
+    )
+    logger = Logger(master_config.logger)
+    logger.log_hyperparams(master_config.model_dump())
+    generation = None
+    nemo_gym_actor = None
+
+    try:
+        generation, _ = setup_generation_only(
+            master_config.policy, master_config.cluster
+        )
+        if use_nemo_gym:
+            if generation_config["backend"] != "vllm":
+                raise NotImplementedError("NeMo-Gym rollout-only requires vLLM.")
+
+            from nemo_rl.environments.nemo_gym import spinup_nemo_gym_actor
+            from nemo_rl.models.generation.interfaces import (
+                resolve_routed_experts_dtype_name_for_model,
+            )
+            from nemo_rl.models.generation.vllm import VllmGeneration
+            from nemo_rl.models.megatron.router_replay import router_replay_enabled
+
+            vllm_generation = cast(VllmGeneration, generation)
+            router_replay = router_replay_enabled(master_config.policy)
+            nemo_gym_actor = spinup_nemo_gym_actor(
+                env_configs=master_config.env,
+                base_urls=vllm_generation.dp_openai_server_base_urls,
+                model_name=master_config.policy["model_name"],
+                enable_router_replay=router_replay,
+                routed_experts_dtype=(
+                    resolve_routed_experts_dtype_name_for_model(
+                        master_config.policy["model_name"]
+                    )
+                    if router_replay
+                    else "int16"
+                ),
+                use_fastokens=bool(
+                    master_config.policy["tokenizer"].get("use_fastokens")
+                ),
+            )
+            task_to_env = {"nemo_gym": nemo_gym_actor}
+        elif task_to_env is None:
+            raise ValueError("Native rollout-only requires task_to_env.")
+
+        for step, batch in enumerate(dataloader):
+            if step >= algorithm_values["max_num_steps"]:
+                break
+            batch = batch.repeat_interleave(
+                algorithm_values["num_generations_per_prompt"]
+            )
+            generation.prepare_for_generation()
+            generation.clear_logger_metrics()
+            try:
+                if use_nemo_gym:
+                    result = run_nemo_gym_rollout_sync(
+                        policy_generation=generation,
+                        input_batch=batch,
+                        tokenizer=tokenizer,
+                        task_to_env=task_to_env,
+                        max_seq_len=master_config.policy["max_total_sequence_length"],
+                        generation_config={
+                            **generation_config,
+                            "stop_token_ids": None,
+                            "stop_strings": None,
+                        },
+                        log_full_result_tables=True,
+                        max_rollout_turns=None,
+                        greedy=False,
+                        effort_config=effort_config,
+                        reward_penalty_config=reward_penalty_config,
+                        thinking_tags=get_nemo_gym_thinking_tags(master_config.env),
+                        mask_env_flagged_samples=should_mask_flagged_samples(
+                            master_config.env
+                        ),
+                    )
+                    metrics = result.rollout_metrics
+                elif should_use_async_rollouts(generation_config):
+                    _, metrics = run_async_multi_turn_rollout(
+                        policy_generation=generation,
+                        input_batch=batch,
+                        tokenizer=tokenizer,
+                        task_to_env=task_to_env,
+                        max_seq_len=master_config.policy[
+                            "max_total_sequence_length"
+                        ],
+                        max_rollout_turns=algorithm_values["max_rollout_turns"],
+                        greedy=False,
+                    )
+                else:
+                    _, metrics = run_multi_turn_rollout(
+                        policy_generation=generation,
+                        input_batch=batch,
+                        tokenizer=tokenizer,
+                        task_to_env=task_to_env,
+                        max_seq_len=master_config.policy[
+                            "max_total_sequence_length"
+                        ],
+                        max_rollout_turns=algorithm_values["max_rollout_turns"],
+                        greedy=False,
+                    )
+            finally:
+                generation.finish_generation()
+
+            rows = [
+                row[0]
+                for value in metrics.values()
+                if isinstance(value, Table)
+                for row in value.data
+            ]
+            if rows:
+                logger.log_string_list_as_jsonl(rows, "debug_rollout_only.jsonl")
+            logger.log_metrics(
+                {
+                    key: value
+                    for key, value in metrics.items()
+                    if not isinstance(value, Table)
+                },
+                step=step,
+                prefix="debug_rollout_only",
+            )
+    finally:
+        if nemo_gym_actor is not None:
+            try:
+                ray.get(nemo_gym_actor.shutdown.remote())
+            finally:
+                ray.kill(nemo_gym_actor)
+        if generation is not None:
+            generation.shutdown()
+        logger.finish()

@@ -47,6 +47,7 @@ from nemo_rl.experience.rollouts import (
     run_async_nemo_gym_rollout,
     run_multi_turn_rollout,
     run_nemo_gym_rollout_sync,
+    should_use_async_rollouts,
 )
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.generation.vllm import VllmConfig, VllmGeneration
@@ -68,6 +69,22 @@ from tests.unit.test_envs import (
 )
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+@pytest.mark.parametrize(
+    ("generation_config", "expected"),
+    [
+        (None, False),
+        ({"backend": "vllm", "vllm_cfg": {"async_engine": True}}, True),
+        ({"backend": "vllm", "vllm_cfg": {"async_engine": False}}, False),
+        ({"backend": "sglang", "use_async_rollouts": True}, True),
+        ({"backend": "megatron", "mcore_generation_config": {}}, False),
+    ],
+)
+def test_should_use_async_rollouts(
+    generation_config: dict | None, expected: bool
+) -> None:
+    assert should_use_async_rollouts(generation_config) is expected
 
 
 class TestCalculateSingleMetric:

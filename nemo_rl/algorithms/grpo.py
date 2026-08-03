@@ -1941,7 +1941,7 @@ def _apply_configured_message_level_advantage_penalties(
 
 def _should_use_async_rollouts(master_config: MasterConfig) -> bool:
     """Determine whether the configured generation backend is asynchronous."""
-    from nemo_rl.experience.rollout_only import should_use_async_rollouts
+    from nemo_rl.experience.rollouts import should_use_async_rollouts
 
     return should_use_async_rollouts(master_config.policy["generation"])
 
