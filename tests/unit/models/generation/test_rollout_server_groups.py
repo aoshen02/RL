@@ -65,3 +65,15 @@ def test_setup_generation_only_builds_independent_server_groups(monkeypatch):
         group.cfg["vllm_cfg"]["tensor_parallel_size"]
         for group in generation.generations
     ] == [2, 4]
+
+
+def test_server_groups_fallback_to_legacy_generation_urls():
+    from nemo_rl.models.generation import GenerationServerGroups
+
+    class LegacyGeneration:
+        cfg = {}
+        dp_openai_server_base_urls = ["http://legacy/v1"]
+
+    groups = GenerationServerGroups([LegacyGeneration()])
+
+    assert groups.openai_server_base_urls() == ["http://legacy/v1"]
