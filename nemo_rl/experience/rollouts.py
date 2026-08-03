@@ -2676,7 +2676,9 @@ def run_rollout_only(
 
     try:
         generation, _ = setup_generation_only(
-            master_config.policy, master_config.cluster
+            master_config.policy,
+            master_config.cluster,
+            enable_server_groups=use_nemo_gym,
         )
         if use_nemo_gym:
             if generation_config["backend"] != "vllm":
@@ -2693,7 +2695,7 @@ def run_rollout_only(
             router_replay = router_replay_enabled(master_config.policy)
             nemo_gym_actor = spinup_nemo_gym_actor(
                 env_configs=master_config.env,
-                base_urls=vllm_generation.dp_openai_server_base_urls,
+                base_urls=vllm_generation.openai_server_base_urls(),
                 model_name=master_config.policy["model_name"],
                 enable_router_replay=router_replay,
                 routed_experts_dtype=(
