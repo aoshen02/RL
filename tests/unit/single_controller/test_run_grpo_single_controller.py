@@ -32,6 +32,8 @@ def main_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             "megatron_cfg": {"mtp_num_layers": 2},
         },
         env={},
+        data={},
+        grpo={},
         data_plane={"enabled": True},
         logger={"log_dir": "/tmp/logs"},
         checkpointing={"enabled": False},
@@ -145,9 +147,50 @@ def test_main_configures_generation_for_trained_mtp(
     main_context.configure_generation.assert_called_once_with(
         main_context.generation_config,
         "tokenizer",
+        is_eval=False,
         has_refit_draft_weights=False,
         trains_mtp=True,
     )
     assert (
         main_context.config.policy["generation"] is main_context.configured_generation
+    )
+
+
+def test_rollout_only_bypasses_single_controller_setup(
+    main_context: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_grpo_single_controller,
+        "parse_args",
+        lambda: (Namespace(config="config.yaml", debug_rollout_only=True), []),
+    )
+    setup_single_controller = MagicMock()
+    run_rollout_only = MagicMock()
+    monkeypatch.setattr(
+        run_grpo_single_controller,
+        "setup_single_controller",
+        setup_single_controller,
+    )
+    monkeypatch.setattr(
+        run_grpo_single_controller,
+        "setup_response_data",
+        lambda *_args, **_kwargs: ("dataset", None, "task_to_env", None),
+    )
+    monkeypatch.setattr(
+        run_grpo_single_controller,
+        "run_rollout_only",
+        run_rollout_only,
+    )
+
+    run_grpo_single_controller.main()
+
+    setup_single_controller.assert_not_called()
+    run_rollout_only.assert_called_once_with(
+        main_context.config,
+        "dataset",
+        "tokenizer",
+        "task_to_env",
+        main_context.config.grpo,
+        use_nemo_gym=False,
     )

@@ -43,7 +43,7 @@ from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.environments.nemo_gym import setup_nemo_gym_config
 from nemo_rl.experience.rollouts import (
-    run_debug_rollout_only,
+    run_rollout_only,
     run_nemo_gym_rollout_sync,
 )
 from nemo_rl.models.generation import configure_generation_config
@@ -194,7 +194,7 @@ def main() -> None:
     if args.debug_rollout_only:
         with rl_init_timer.time("ray_connect"):
             init_ray()
-        run_debug_rollout_only(
+        run_rollout_only(
             config,
             train_dataset,
             tokenizer,

@@ -33,10 +33,13 @@ from nemo_rl.algorithms.single_controller_utils import (
     setup_single_controller,
 )
 from nemo_rl.algorithms.utils import get_tokenizer
+from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.environments.nemo_gym import setup_nemo_gym_config
+from nemo_rl.experience.rollouts import run_rollout_only
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.utils.config import (
+    add_debug_rollout_only_argument,
     load_config,
     parse_hydra_overrides,
     register_omegaconf_resolvers,
@@ -58,6 +61,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
     )
+    add_debug_rollout_only_argument(parser)
     args, overrides = parser.parse_known_args()
     return args, overrides
 
@@ -66,6 +70,7 @@ def main() -> None:
     """Main entry point."""
     register_omegaconf_resolvers()
     args, overrides = parse_args()
+    rollout_only = getattr(args, "debug_rollout_only", False)
 
     if not args.config:
         args.config = os.path.join(
@@ -114,13 +119,39 @@ def main() -> None:
     config.policy["generation"] = configure_generation_config(
         config.policy["generation"],
         tokenizer,
+        is_eval=rollout_only,
         has_refit_draft_weights=has_refit_draft_weights,
         trains_mtp=trains_mtp,
     )
 
-    # NeMo-Gym specific config setup.
-    if bool(config.env.get("should_use_nemo_gym")):
+    use_nemo_gym = bool(config.env.get("should_use_nemo_gym"))
+    if use_nemo_gym:
         setup_nemo_gym_config(config, tokenizer)
+
+    # Keep this branch before setup_single_controller: that factory creates
+    # the trainer, optimizer, data-plane client, weight synchronizer, and all
+    # other training-side workers. Rollout-only must not construct any of them.
+    if rollout_only:
+        if use_nemo_gym:
+            dataset, _val_dataset = setup_response_data(
+                tokenizer, config.data, env_configs=None
+            )
+            task_to_env = None
+        else:
+            dataset, _val_dataset, task_to_env, _val_task_to_env = (
+                setup_response_data(
+                    tokenizer, config.data, env_configs=config.env
+                )
+            )
+        run_rollout_only(
+            config,
+            dataset,
+            tokenizer,
+            task_to_env,
+            config.grpo,
+            use_nemo_gym=use_nemo_gym,
+        )
+        return
 
     actor_args = setup_single_controller(config, tokenizer)
 

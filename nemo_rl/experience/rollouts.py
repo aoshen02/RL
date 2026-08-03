@@ -2589,7 +2589,7 @@ def _postprocess_single_nemo_gym_group(
     )
 
 
-def run_debug_rollout_only(
+def run_rollout_only(
     config: Any,
     dataset: Any,
     tokenizer: PreTrainedTokenizerBase,
@@ -2602,9 +2602,11 @@ def run_debug_rollout_only(
 ) -> None:
     """Run the normal rollout path without creating training workers.
 
-    This is intentionally the only debug-only orchestration path. Launchers
-    select it before their algorithm ``setup()`` functions, which prevents
-    policy, critic, optimizer, checkpoint, and trainer creation.
+    Launchers select this shared path before their algorithm ``setup()``
+    functions, which prevents policy, critic, optimizer, checkpoint, and
+    trainer creation.  The rollout implementation remains the same one used
+    by training; this function only supplies the generation and environment
+    lifecycle normally owned by the training setup.
     """
     from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -2748,7 +2750,7 @@ def run_debug_rollout_only(
                 for row in value.data
             ]
             if rows:
-                logger.log_string_list_as_jsonl(rows, "debug_rollout_only.jsonl")
+                logger.log_string_list_as_jsonl(rows, "rollout_only.jsonl")
             logger.log_metrics(
                 {
                     key: value
@@ -2756,7 +2758,7 @@ def run_debug_rollout_only(
                     if not isinstance(value, Table)
                 },
                 step=step,
-                prefix="debug_rollout_only",
+                prefix="rollout_only",
             )
     finally:
         if nemo_gym_actor is not None:
