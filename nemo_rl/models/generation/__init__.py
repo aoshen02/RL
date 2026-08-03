@@ -45,6 +45,7 @@ class GenerationServerGroups:
             for generation in generations
             for url in getattr(generation, "dp_openai_server_base_urls", [])
         ]
+        self._next_generation_index = 0
 
     def openai_server_base_urls(self) -> list[str | None]:
         urls: list[str | None] = []
@@ -60,6 +61,25 @@ class GenerationServerGroups:
     def prepare_for_generation(self, *args: object, **kwargs: object) -> None:
         for generation in self.generations:
             generation.prepare_for_generation(*args, **kwargs)
+
+    def _next_generation(self) -> GenerationInterface:
+        generation = self.generations[self._next_generation_index]
+        self._next_generation_index = (self._next_generation_index + 1) % len(
+            self.generations
+        )
+        return generation
+
+    def generate(self, *args: object, **kwargs: object):
+        return self._next_generation().generate(*args, **kwargs)
+
+    async def generate_async(self, *args: object, **kwargs: object):
+        generate_async = getattr(self._next_generation(), "generate_async", None)
+        if generate_async is None:
+            raise NotImplementedError(
+                "The configured generation backend does not support async generation."
+            )
+        async for result in generate_async(*args, **kwargs):
+            yield result
 
     def clear_logger_metrics(self) -> None:
         for generation in self.generations:
