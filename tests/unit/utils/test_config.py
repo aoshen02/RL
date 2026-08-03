@@ -22,7 +22,6 @@ from nemo_rl.utils.config import (
     add_debug_rollout_only_argument,
     load_config,
     register_omegaconf_resolvers,
-    rollout_only_requested,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -245,11 +244,6 @@ def test_debug_rollout_only_argument_defaults_to_disabled():
 
     assert parser.parse_args([]).debug_rollout_only is False
     assert parser.parse_args(["--debug-rollout-only"]).debug_rollout_only is True
-
-
-def test_rollout_only_requested_reads_runtime_mode():
-    assert rollout_only_requested({"runtime": {"mode": "train"}}) is False
-    assert rollout_only_requested({"runtime": {"mode": "rollout_only"}}) is True
 
 
 @pytest.mark.parametrize("config_path", ULTRA_CONFIG_PATHS)

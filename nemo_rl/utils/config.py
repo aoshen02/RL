@@ -22,29 +22,12 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 
 
 def add_debug_rollout_only_argument(parser: argparse.ArgumentParser) -> None:
-    """Add the legacy CLI alias for rollout-only execution."""
+    """Add the common rollout-only debug flag to an online launcher."""
     parser.add_argument(
         "--debug-rollout-only",
         action="store_true",
         help="Run rollout steps without initializing training workers.",
     )
-
-
-def rollout_only_requested(config: object) -> bool:
-    """Return whether the materialized config requests rollout-only execution."""
-    runtime = (
-        config.get("runtime", {})
-        if isinstance(config, dict)
-        else getattr(config, "runtime", {})
-    )
-    if runtime is None:
-        return False
-    mode = (
-        runtime.get("mode")
-        if isinstance(runtime, dict)
-        else getattr(runtime, "mode", None)
-    )
-    return mode == "rollout_only"
 
 
 def resolve_path(base_path: Path, path: str) -> Path:
