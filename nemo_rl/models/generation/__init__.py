@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import warnings
+from copy import deepcopy
 from typing import TYPE_CHECKING, cast
 
 from transformers import PreTrainedTokenizerBase
@@ -22,6 +23,7 @@ from nemo_rl.models.generation.interfaces import GenerationConfig, GenerationInt
 from nemo_rl.models.generation.trtllm import TrtllmConfig
 from nemo_rl.models.generation.vllm import VllmConfig
 from nemo_rl.models.generation.vllm.config import VLLM_SPARSE_REFIT_TRANSPORTS
+from nemo_rl.distributed.worker_group_utils import recursive_merge_options
 
 if TYPE_CHECKING:
     from nemo_rl.distributed.virtual_cluster import ClusterConfig, RayVirtualCluster
@@ -30,10 +32,54 @@ if TYPE_CHECKING:
 TokenizerType = PreTrainedTokenizerBase
 
 
+class GenerationServerGroups:
+    """Expose independent generation servers through one rollout interface."""
+
+    def __init__(self, generations: list[GenerationInterface]) -> None:
+        if not generations:
+            raise ValueError("At least one generation server group is required")
+        self.generations = generations
+        self.cfg = generations[0].cfg
+        self.dp_openai_server_base_urls = [
+            url
+            for generation in generations
+            for url in getattr(generation, "dp_openai_server_base_urls", [])
+        ]
+
+    def openai_server_base_urls(self) -> list[str | None]:
+        urls: list[str | None] = []
+        for generation in self.generations:
+            method = getattr(generation, "openai_server_base_urls", None)
+            urls.extend(
+                method()
+                if method is not None
+                else getattr(generation, "dp_openai_server_base_urls", [])
+            )
+        return urls
+
+    def prepare_for_generation(self, *args: object, **kwargs: object) -> None:
+        for generation in self.generations:
+            generation.prepare_for_generation(*args, **kwargs)
+
+    def clear_logger_metrics(self) -> None:
+        for generation in self.generations:
+            generation.clear_logger_metrics()
+
+    def finish_generation(self, *args: object, **kwargs: object) -> None:
+        for generation in self.generations:
+            generation.finish_generation(*args, **kwargs)
+
+    def shutdown(self) -> None:
+        for generation in self.generations:
+            generation.shutdown()
+
+
 def setup_generation_only(
     policy_config: "PolicyConfig",
     cluster_config: "ClusterConfig",
-) -> tuple["GenerationInterface", "RayVirtualCluster"]:
+    *,
+    enable_server_groups: bool = False,
+) -> tuple["GenerationInterface | GenerationServerGroups", "RayVirtualCluster"]:
     """Start the configured generation backend without policy workers."""
     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
 
@@ -61,6 +107,74 @@ def setup_generation_only(
             num_nodes = 1
     if num_nodes is None or gpus_per_node is None or gpus_per_node <= 0:
         raise ValueError("--debug-rollout-only requires explicit generation resources.")
+
+    server_groups = generation_config.get("server_groups")
+    if server_groups:
+        if not enable_server_groups:
+            raise ValueError(
+                "policy.generation.server_groups requires the NeMo-Gym rollout path."
+            )
+        if backend != "vllm":
+            raise NotImplementedError("Server groups currently require vLLM.")
+        if not isinstance(server_groups, list):
+            raise TypeError("policy.generation.server_groups must be a list")
+        if not colocated["enabled"]:
+            raise ValueError("Server groups require colocated generation.")
+        if sum(int(group.get("count", 0)) for group in server_groups) != num_nodes:
+            raise ValueError(
+                f"The server-group counts must equal cluster.num_nodes ({num_nodes})."
+            )
+
+        from nemo_rl.models.generation.vllm import VllmGeneration
+        from nemo_rl.models.generation.vllm.config import normalize_vllm_refit_config
+        from nemo_rl.models.megatron.router_replay import (
+            configure_vllm_for_router_replay,
+        )
+
+        generations: list[GenerationInterface] = []
+        first_cluster: RayVirtualCluster | None = None
+        for group_index, group in enumerate(server_groups):
+            count = int(group.get("count", 0))
+            if count <= 0:
+                raise ValueError("Each server group count must be positive.")
+            overrides = group.get("overrides", {})
+            if not isinstance(overrides, dict):
+                raise TypeError("Each server-group overrides value must be a mapping.")
+            group_config = recursive_merge_options(
+                deepcopy(generation_config), overrides
+            )
+            group_config.pop("server_groups", None)
+            group_policy = deepcopy(policy_config)
+            group_policy["generation"] = group_config
+            group_config["model_name"] = policy_config["model_name"]
+            configure_vllm_for_router_replay(group_policy)
+            vllm_config = cast(VllmConfig, group_config)
+            normalize_vllm_refit_config(vllm_config)
+            vllm_config.setdefault("vllm_kwargs", {})["hf_overrides"] = (
+                policy_config.get("hf_config_overrides", {})
+            )
+            group_cluster = RayVirtualCluster(
+                name=f"debug_rollout_group_{group_index}",
+                bundle_ct_per_node_list=[gpus_per_node] * count,
+                use_gpus=True,
+                num_gpus_per_node=gpus_per_node,
+                max_colocated_worker_groups=1,
+                port_range_low=cluster_config.get("master_port_range_low"),
+                port_range_high=cluster_config.get("master_port_range_high"),
+                segment_size=cluster_config.get("segment_size"),
+            )
+            generations.append(
+                VllmGeneration(
+                    group_cluster,
+                    vllm_config,
+                    name_prefix=f"vllm_policy_group_{group_index}",
+                )
+            )
+            first_cluster = first_cluster or group_cluster
+        assert first_cluster is not None
+        grouped_generation = GenerationServerGroups(generations)
+        grouped_generation.finish_generation()
+        return grouped_generation, first_cluster
 
     cluster = RayVirtualCluster(
         name="debug_rollout_cluster",
