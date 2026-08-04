@@ -25,7 +25,7 @@ from typing import Any, AsyncGenerator, Optional, cast
 import ray
 import torch
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import (
@@ -679,6 +679,10 @@ class VllmAsyncGenerationWorkerImpl(
         )
 
         generation_config = self.cfg
+
+        @app.get("/health")
+        async def health() -> Response:
+            return Response(status_code=200)
 
         @app.post("/v1/completions")
         async def create_completion(request: CompletionRequest, raw_request: Request):

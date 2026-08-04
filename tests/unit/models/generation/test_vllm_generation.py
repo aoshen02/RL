@@ -1931,8 +1931,6 @@ def test_vllm_managed_router_command():
         "consistent_hash",
         "--request-id-headers",
         "X-Session-ID",
-        "--health-check-endpoint",
-        "/docs",
     ]
 
 
