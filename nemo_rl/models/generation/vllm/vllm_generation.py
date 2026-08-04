@@ -371,6 +371,8 @@ class VllmGeneration(GenerationInterface):
             str(self.router_policy),
             "--request-id-headers",
             self.router_request_id_header,
+            "--health-check-endpoint",
+            "/docs",
         ]
 
     def _start_router(self) -> None:
