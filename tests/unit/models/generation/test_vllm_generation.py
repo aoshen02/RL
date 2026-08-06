@@ -3109,3 +3109,17 @@ def test_vllm_megatron_weight_update_with_packing(cluster, test_input_data):
             megatron_policy.shutdown()
         if vllm_generation:
             vllm_generation.shutdown()
+
+
+def test_init_collective_rank_offset_shifts_rank_prefixes():
+    gen = VllmGeneration.__new__(VllmGeneration)
+    gen.cfg = {"vllm_cfg": {"async_engine": True}}
+    gen.dp_size = 3
+    gen.worker_group = MagicMock()
+    gen.worker_group.workers = [object()] * 6
+    gen.init_collective("ip", 1, 20, train_world_size=8, rank_offset=5)
+    kwargs = gen.worker_group.run_all_workers_multiple_data.call_args.kwargs
+    assert kwargs["rank_prefix"] == [5, 7, 9]
+    gen.init_collective("ip", 1, 20, train_world_size=8)
+    kwargs = gen.worker_group.run_all_workers_multiple_data.call_args.kwargs
+    assert kwargs["rank_prefix"] == [0, 2, 4]
