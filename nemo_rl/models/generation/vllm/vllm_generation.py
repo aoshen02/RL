@@ -307,6 +307,8 @@ class VllmGeneration(GenerationInterface):
             self._reserve_router(name_prefix)
             if not defer_model_load:
                 self._start_router()
+        elif self.router_url and not defer_model_load:
+            self._register_router_workers()
 
         self._step_metrics_snapshot: dict[str | tuple[str, int], float] | None = None
 
@@ -432,6 +434,34 @@ class VllmGeneration(GenerationInterface):
             f"vLLM Router did not become healthy in {timeout_s}s; "
             f"see {self._router_log_path}"
         )
+
+    def _register_router_workers(self) -> None:
+        """Register backend workers with an externally managed Router."""
+        if not self.router_url or self.router_policy:
+            return
+        import http.client
+        import urllib.parse
+
+        parsed = urllib.parse.urlparse(self._router_base_url().removesuffix("/v1"))
+        for base_url in self.dp_openai_server_base_urls:
+            if not base_url:
+                continue
+            worker_url = base_url.removesuffix("/v1")
+            query = urllib.parse.urlencode({"url": worker_url})
+            connection = http.client.HTTPConnection(
+                parsed.hostname, parsed.port, timeout=30
+            )
+            try:
+                connection.request("POST", f"/add_worker?{query}")
+                response = connection.getresponse()
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"Router at {self.router_url} rejected worker "
+                        f"{worker_url}: HTTP {response.status} "
+                        f"{response.read().decode()[:200]}"
+                    )
+            finally:
+                connection.close()
 
     def _stop_router(self) -> None:
         process = getattr(self, "_router_process", None)
@@ -695,6 +725,7 @@ class VllmGeneration(GenerationInterface):
         self.device_uuids = self._report_device_id()
 
         self._start_router()
+        self._register_router_workers()
 
     def _post_init(self):
         # Choose the appropriate method based on async_engine setting
