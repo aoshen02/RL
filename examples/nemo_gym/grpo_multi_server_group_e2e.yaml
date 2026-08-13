@@ -1,0 +1,62 @@
+defaults: grpo_workplace_assistant_nemotron_nano_v2_9b.yaml
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 2
+  max_num_steps: 2
+  val_period: -1
+  val_at_start: false
+  val_at_end: false
+
+checkpointing:
+  enabled: false
+
+policy:
+  model_name: Qwen/Qwen3-0.6B
+  train_global_batch_size: 4
+  max_total_sequence_length: 8192
+  dtensor_cfg:
+    tensor_parallel_size: 1
+  megatron_cfg:
+    tensor_model_parallel_size: 1
+    moe_per_layer_logging: false
+  generation:
+    max_new_tokens: 128
+    refit_transport: null
+    vllm_cfg:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.6
+      max_model_len: ${policy.max_total_sequence_length}
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: true
+        tool_parser: hermes
+    vllm_kwargs:
+      compilation_config:
+        backend: eager
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 6
+        num_nodes: 1
+    server_groups:
+      - name: low_latency
+        gpus: 2
+        overrides:
+          vllm_cfg: {tensor_parallel_size: 1}
+          vllm_kwargs: {max_num_seqs: 16}
+      - name: high_throughput
+        gpus: 4
+        overrides:
+          vllm_cfg: {tensor_parallel_size: 4}
+          vllm_kwargs: {max_num_seqs: 512}
+
+logger:
+  wandb_enabled: false
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  monitor_gpus: false
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1
+  segment_size: null
