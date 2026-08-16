@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import math
 import os
@@ -169,6 +170,10 @@ class NemoGymConfig(TypedDict):
     pad_dynamic_image_shapes: NotRequired[
         bool
     ]  # Normalize heterogeneous image tensors while retaining exact imgs_sizes
+    # Cap on rollouts in flight. Unset means the whole batch is dispatched at once,
+    # which with long prompts can stall a replica's HTTP server long enough that new
+    # connections time out and a router takes the replica out of rotation.
+    max_concurrent_rollouts: NotRequired[int | None]
 
 
 def _detect_invalid_tool_call_and_malformed_thinking(
@@ -594,8 +599,11 @@ Depending on your data shape, you may want to change these values."""
         encode_images_in_examples(nemo_gym_examples)
 
         timer.start("_run_rollouts_total")
+        limit = self.cfg.get("max_concurrent_rollouts")
         nemo_gym_result_iterator = self.rch.run_examples(
-            examples=nemo_gym_examples, head_server_config=self.head_server_config
+            examples=nemo_gym_examples,
+            head_server_config=self.head_server_config,
+            semaphore=asyncio.Semaphore(limit) if limit else None,
         )
 
         num_results = 0
@@ -1080,6 +1088,7 @@ def spinup_nemo_gym_actor(
         _value = nemo_gym_dict.pop(_flag, None)
         if _value is not None:
             multimodal_flags[_flag] = bool(_value)
+    max_concurrent_rollouts = nemo_gym_dict.pop("max_concurrent_rollouts", None)
 
     # Pass prebuilt cache + venv dirs through the global config so the gym reuses
     # image-baked venvs instead of rebuilding them.
@@ -1099,6 +1108,7 @@ def spinup_nemo_gym_actor(
         require_routed_experts=enable_router_replay,
         routed_experts_dtype=routed_experts_dtype,
         use_fastokens=use_fastokens,
+        max_concurrent_rollouts=max_concurrent_rollouts,
         initial_global_config_dict=nemo_gym_dict,
         **multimodal_flags,
     )
