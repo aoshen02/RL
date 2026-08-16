@@ -16,6 +16,7 @@ import copy
 import gc
 import logging
 import os
+import socket
 import sys
 from typing import Any, Optional, cast
 
@@ -266,6 +267,14 @@ class BaseVllmGenerationWorker:
                 enables overlapping vLLM model loading with NeMo Gym init.
         """
         from nemo_rl.distributed.numa_utils import bind_to_gpu_numa
+
+        if os.environ.get("TRITON_CACHE_DIR") and os.environ.get(
+            "NRL_TRITON_NODE_SCOPED", "1"
+        ) != "0":
+            base = os.environ["TRITON_CACHE_DIR"]
+            host = socket.gethostname()
+            if os.path.basename(base) != host:
+                os.environ["TRITON_CACHE_DIR"] = os.path.join(base, host)
 
         # Only bind single-GPU workers to their GPU's NUMA node.
         # For TP>1 workers, the parent process spans multiple NUMA nodes;
