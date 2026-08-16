@@ -1,12 +1,12 @@
 grpo:
   max_num_epochs: 1
-  num_prompts_per_step: 64
-  num_generations_per_prompt: 16
+  num_prompts_per_step: 48
+  num_generations_per_prompt: 4
   max_rollout_turns: 1 # for multi-turn rollouts. Workplace assistant has 1 turn but can have up to 6 tool-calling steps
   max_num_steps: 1000000
   normalize_rewards: true
   use_leave_one_out_baseline: true
-  val_period: 10
+  val_period: 1
   val_start_at: -1
   val_at_start: true
   val_at_end: false
@@ -136,6 +136,7 @@ policy:
     moe_enable_deepep: false
     moe_token_dispatcher_type: "alltoall"
     moe_shared_expert_overlap: false
+    moe_per_layer_logging: false  # required by the pydantic MasterConfig; setup.py's setdefault does not cover it
     gradient_accumulation_fusion: false
     use_fused_weighted_squared_relu: false
 
@@ -248,7 +249,9 @@ policy:
       kv_cache_dtype: "auto"
       expose_http_server: true
       skip_tokenizer_init: false
-      # tool_parser_plugin: ???  # This is set to the path for Nemotron Nano v2
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 10
+      tool_parser_plugin: nemo_rl/models/generation/vllm/tool_parsers/nemotron_json.py
       http_server_serving_chat_kwargs:
         # Workplace assistant uses 26 tools, so we enable auto_tools.
         # For Nemotron Nano v2, we use the dedicated `nemotron_json` tool parser
@@ -262,6 +265,7 @@ policy:
         backend: eager
       # We need the Mamba cache to be set to fp32 for Nemotron Nano v2
       mamba_ssm_cache_dtype: "float32"
+      mamba_cache_mode: align
     colocated:
       # true: generation shares training GPUs
       # false: uses dedicated generation resources
@@ -309,6 +313,7 @@ env:
     # RL (3000-4999) or vLLM (7000-8999). See ray.sub for the full port layout.
     port_range_low: 5000
     port_range_high: 5999
+    router_url: null
     is_trajectory_collection: false  # Set this to true to enable trajectory collection (no training). You may also want to increase `policy.generation.vllm_cfg.gpu_memory_utilization`
     config_paths:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
@@ -322,6 +327,7 @@ env:
     policy_model:
       responses_api_models:
         vllm_model:
+          session_affinity_header: X-Session-ID
           # Disable reasoning!
           uses_reasoning_parser: false
           extra_body:
@@ -353,5 +359,5 @@ logger:
     flush_interval: 10  # How often to flush GPU usage metrics to the loggers (in seconds)
 
 cluster:
-  gpus_per_node: 8
-  num_nodes: 1  # Single node by default; set to 2+ for multi-node training
+  gpus_per_node: 4
+  num_nodes: 8

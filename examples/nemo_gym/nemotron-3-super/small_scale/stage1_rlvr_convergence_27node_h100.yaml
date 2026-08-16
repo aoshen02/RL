@@ -1,30 +1,70 @@
 defaults: "../stage1_rlvr.yaml"
 
+# GB200 4-GPU/node shape; parameters copied from examples/configs/recipes/llm/
+# grpo-nemotron3-super-120BA12B-8n4g-megatron.yaml.
+#
+# 8 nodes x 4 GPUs = 32 GPUs  ->  16 for training (4 nodes) + 16 for generation (4 nodes)
+#   Training    TP2 x CP1 x PP1 = 2 GPUs/replica -> DP=8; ETP1 x EP16 == TP2 x DP8  ✓
+#   Generation  vLLM TP4 -> 4 engines
+# Only entries that differ from the parent config are written here: EP16 / ETP1 / PP1 /
+# colocated.enabled=false / mamba_* / compilation_config are all inherited from
+# stage1_rlvr.yaml with the correct values.
+#
+# Same split of responsibilities as super_launch.sh: model path, data paths, and the
+# machine-dependent vLLM engine args are injected by the launch script on the command
+# line, so this file stays machine-independent.
+
+grpo:
+  num_prompts_per_step: 16
+  num_generations_per_prompt: 8
+  async_grpo:
+    enabled: false
+
 policy:
-  generation_batch_size: 32
+  train_global_batch_size: ${mul:${grpo.num_prompts_per_step}, ${grpo.num_generations_per_prompt}}
+  # Measured initial prompts in this dataset cluster at 4140-4181 tokens (1255 samples,
+  # almost no long tail). 8192 would leave only 4k for the agent's multi-turn tool calls,
+  # so roughly 1% of requests blow past the context and get 400'd by vLLM.
+  # 16384 leaves about 12k of trajectory room. The parent config derives train_mb_tokens /
+  # logprob_mb_tokens / max_new_tokens / vllm max_model_len from this one value, so
+  # changing it here is enough.
+  # Official prod (stage1_rlvr.yaml:96) uses 65536; we don't follow because train_mb_tokens
+  # would grow 8x and this cluster can't fit the activation memory.
+  max_total_sequence_length: 16384
+
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    context_parallel_size: 1
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+      NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+      NRL_REFIT_NUM_BUFFERS: "1"
+
   generation:
     colocated:
       resources:
-        num_nodes: 12
+        gpus_per_node: 4
+        num_nodes: 4
     vllm_cfg:
-      max_num_seqs: 16
-      gpu_memory_utilization: 0.70
-
-  megatron_cfg:
-    env_vars:
-      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      tensor_parallel_size: 4
+      gpu_memory_utilization: 0.5
+      env_vars:
+        NRL_REFIT_BUFFER_MEMORY_RATIO: "0.005"
+        NRL_REFIT_NUM_BUFFERS: "1"
 
 env:
   nemo_gym:
+    router_url: null   # Key must exist for Hydra struct mode to allow a CLI override
+    num_gpu_nodes: 0
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
     policy_model:
       responses_api_models:
         vllm_model:
           num_workers: 4
-    safety_judge_model:
-      responses_api_models:
-        local_vllm_model:
-          vllm_serve_kwargs:
-            data_parallel_size: 2
+          session_affinity_header: X-Session-ID
 
 cluster:
-  num_nodes: 20   # 8 train (TP4*CP8*PP1=32 GPUs, DP2) + 12 gen (TP8). +7 judge nodes -> SBATCH=27.
+  gpus_per_node: 4
+  num_nodes: 8
