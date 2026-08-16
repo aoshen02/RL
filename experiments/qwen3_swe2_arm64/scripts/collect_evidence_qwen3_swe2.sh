@@ -15,18 +15,23 @@ SINCE="${2:-}"
 LOG="$(ls "$RD"/slurm-*.log 2>/dev/null | head -1)"
 [[ -s "$LOG" ]] || { echo "no non-empty slurm log in $RD" >&2; exit 1; }
 
-SWE_RESULTS=/mnt/lustre01/users/inf-aoshen/vllm/projects/vllm-rl-day0-support/nmu/pr_worktrees/gym-router-url/3rdparty/Gym-workspace/Gym/responses_api_agents/swe_agents
+# sandbox 产物的位置由 run.env 的 gym_results 决定 —— GYM_DIR 可以指向别的 Gym 树
+# (例如 review worktree)。写死主工作区路径会让收集器在空目录里找证据,把一次
+# 健康的运行判成 3/4/5/8 全 NO(13203 就是这样)。
+DEFAULT_SWE_RESULTS=/mnt/lustre01/users/inf-aoshen/vllm/projects/vllm-rl-day0-support/nmu/pr_worktrees/gym-router-url/3rdparty/Gym-workspace/Gym/responses_api_agents/swe_agents
+SWE_RESULTS="$(grep -m1 "^gym_results=" "$RD/run.env" 2>/dev/null | cut -d= -f2-)"
+[[ -d "$SWE_RESULTS" ]] || SWE_RESULTS="$DEFAULT_SWE_RESULTS"
 OH_EVAL="$SWE_RESULTS/swe_openhands_setup/OpenHands/evaluation/oh"
 
 # Restrict to artifacts from this run. A stale sandbox dir from an earlier job
 # previously made a failed run look like it had produced evidence.
 newer() { if [[ -n "$SINCE" ]]; then find "$1" -newermt "$SINCE" "${@:2}"; else find "$1" "${@:2}"; fi; }
 
-# entry_trace.log (xtrace) is gone: its `exec` redirection permanently rewired
-# the sourcing shell's fds, broke OpenHands' PS1 completion detection and hung
-# every action for 600s. The replacement redirects single commands only and is
-# named entry.log. Accept either so older run dirs still parse.
-SANDBOX="$(newer "$SWE_RESULTS/results" \( -name entry.log -o -name entry_trace.log \) 2>/dev/null | head -1)"
+# Locate a sandbox by the artefact Gym itself writes. Earlier versions keyed on
+# entry.log / entry_trace.log, which were probes this repo injected; both have
+# since been removed as observability, so keying on them silently resolved the
+# sandbox to /nonexistent and reported items 3/5 as NO on a healthy run.
+SANDBOX="$(newer "$SWE_RESULTS/results" -name nemo_gym_metrics.json 2>/dev/null | head -1)"
 SANDBOX="$(dirname "${SANDBOX:-/nonexistent}")"
 
 ok()   { printf '%-26s YES  %s\n' "$1" "${2:-}"; }
@@ -60,27 +65,27 @@ else
   no "3 initialize_runtime" "(no nemo_gym_metrics.json)"
 fi
 
-# 4. ARM64 SIF actually executed, and the entry script completed.
-T="$SANDBOX/entry.log"; [[ -s "$T" ]] || T="$SANDBOX/entry_trace.log"
-if [[ -s "$T" ]]; then
-  bad=$(grep -c "No item found" "$T")
-  sym=$(grep -c "Using /testbed directly" "$T" 2>/dev/null)
-  # the symlink echo goes to the agent log; entry.log carries workspace= instead
-  [[ "$sym" -eq 0 ]] && sym=$(grep -c "completed workspace=." "$T" 2>/dev/null)
-  fin=$(grep -c "\[entry\].*completed" "$T")
-  # The old xtrace had a "jq check" probe; entry.log does not. Report the host
-  # binary's arch instead — an empty `jq=` field read as "jq broken" when in
-  # fact the aarch64 fallback was fine.
+# 4. ARM64 SIF actually executed and instance_swe_entry.sh completed. The old
+# proof was an entry.log line written by a patched entry script; that probe was
+# observability and has been removed, so the evidence now comes from what the
+# failure actually looked like: sourcing the entry script is what used to hang
+# for 600s, so a non-zero initialize_runtime_time is proof it completed.
+if [[ -s "$M" ]]; then
+  # miniforge3 lives in swe_openhands_setup, which a GYM_DIR run bind-mounts from
+  # the default tree — so on the host it is only present under DEFAULT_SWE_RESULTS.
   jqbin="$SWE_RESULTS/swe_openhands_setup/miniforge3/bin/jq"
-  jqv="$(file -b "$jqbin" 2>/dev/null | cut -d, -f2 | tr -d ' ')"
-  jqv="${jqv:-absent}"
-  if [[ "$bad" -eq 0 && "$sym" -gt 0 && "$fin" -gt 0 ]]; then
-    ok "4 arm64 sif + swe entry" "(jq_binary=$jqv, symlink workspace, completed)"
+  [[ -f "$jqbin" ]] || jqbin="$DEFAULT_SWE_RESULTS/swe_openhands_setup/miniforge3/bin/jq"
+  jqv="$(file -b "$jqbin" 2>/dev/null | cut -d, -f2 | tr -d ' ')"; jqv="${jqv:-absent}"
+  init=$(python3 -c "
+import json,sys
+print(json.load(open('$M')).get('initialize_runtime_time') or 0)" 2>/dev/null)
+  if [[ -n "$init" ]] && python3 -c "import sys; sys.exit(0 if float('$init')>0 else 1)" 2>/dev/null; then
+    ok "4 arm64 sif + swe entry" "(jq_binary=$jqv, initialize_runtime=${init}s)"
   else
-    no "4 arm64 sif + swe entry" "(no_item=$bad symlink=$sym completed=$fin jq=$jqv)"
+    no "4 arm64 sif + swe entry" "(initialize_runtime=$init jq=$jqv)"
   fi
 else
-  no "4 arm64 sif + swe entry" "(no entry_trace.log)"
+  no "4 arm64 sif + swe entry" "(no nemo_gym_metrics.json)"
 fi
 
 # 5. OpenHands ran and emitted an output file.

@@ -76,6 +76,9 @@ stamp gym_venv_verified
   echo "cluster=1x4"
   echo "train=TP2_PP1_CP1_EP1"
   echo "generation=vLLM_TP2_non_colocated_async"
+  # 证据收集要据此定位 sandbox 产物。GYM_DIR 可以指向别的 Gym 树,写死路径
+  # 会让收集器在空目录里找证据,把健康的运行判成失败。
+  echo "gym_results=${GYM_RESULTS_HOST:-/opt/nemo-rl/3rdparty/Gym-workspace/Gym/responses_api_agents/swe_agents}"
 } | tee "$RUN_DIR/run.env"
 
 test -f "$CONFIG"

@@ -44,7 +44,26 @@ RUN_NAME="qwen3_swe2_tp2_e2e_${TS}"
 HOST_RUN_DIR="$AGENT_RUN/results/$RUN_NAME"
 mkdir -p "$HOST_RUN_DIR"
 RL_COMMIT="$(git -C "$RL_ROOT" rev-parse HEAD)"
-GYM_COMMIT="$(git -C "$RL_ROOT/3rdparty/Gym-workspace/Gym" rev-parse HEAD)"
+DEFAULT_GYM="$RL_ROOT/3rdparty/Gym-workspace/Gym"
+# GYM_DIR:用另一份 Gym 树作代码源(例如 review worktree),不动主工作区。
+# swe_openhands_setup / swe_swebench_setup 是 .gitignore 里的构建产物(5.8G),
+# 只存在于主工作区,所以单独 bind 进来复用 —— 否则每次都要从零重建 OpenHands。
+GYM_DIR="${GYM_DIR:-$DEFAULT_GYM}"
+GYM_MNT=/opt/nemo-rl/3rdparty/Gym-workspace/Gym
+EXTRA_MOUNTS=""
+if [[ "$GYM_DIR" != "$DEFAULT_GYM" ]]; then
+  # 全部 swe_*_setup,不是只挑用得上的两个:Gym 启动时会为每个 dataset harness 建
+  # setup 目录,漏一个就在 e2e 进程里现场 uv pip install(13203 装了 multilingual
+  # 和 r2e_gym),既拖慢冷启动,又让"本进程不应有安装"这条证据判负。
+  for src in "$DEFAULT_GYM"/responses_api_agents/swe_agents/swe_*_setup; do
+    [[ -d "$src" ]] || continue
+    EXTRA_MOUNTS+=",$src:$GYM_MNT/responses_api_agents/swe_agents/$(basename "$src")"
+  done
+  echo "gym_src=$GYM_DIR (reusing setup dirs from $DEFAULT_GYM)"
+fi
+GYM_COMMIT="$(git -C "$GYM_DIR" rev-parse HEAD)"
+# 宿主视角的 sandbox 产物目录;容器内路径对宿主上的证据收集器没用。
+GYM_RESULTS_HOST="$GYM_DIR/responses_api_agents/swe_agents"
 
 sbatch \
   --job-name="$RUN_NAME" \
@@ -58,10 +77,10 @@ sbatch \
   --time=06:00:00 \
   --output="$HOST_RUN_DIR/slurm-%j.log" \
   --container-image="$IMAGE" \
-  --container-mounts="$RL_ROOT:/workspace/nemo-rl,$RL_ROOT/3rdparty/Gym-workspace/Gym:/opt/nemo-rl/3rdparty/Gym-workspace/Gym,$AGENT_RUN:/workspace/agent_run,/mnt/lustre01:/mnt/lustre01" \
+  --container-mounts="$RL_ROOT:/workspace/nemo-rl,$GYM_DIR:$GYM_MNT$EXTRA_MOUNTS,$AGENT_RUN:/workspace/agent_run,/mnt/lustre01:/mnt/lustre01" \
   --container-workdir=/workspace/nemo-rl \
   --container-remap-root \
-  --export=ALL,RUN_DIR="/workspace/agent_run/results/$RUN_NAME",RL_ROOT=/workspace/nemo-rl,RL_COMMIT="$RL_COMMIT",GYM_COMMIT="$GYM_COMMIT",QWEN3_SWE2_GYM_VENV_DIR="$GYM_VENV_DIR",SWE_INSTANCE="$SWE_INSTANCE",NUM_PROMPTS="${NUM_PROMPTS:-1}",NUM_GENERATIONS="${NUM_GENERATIONS:-1}",SWE_DATASET="${SWE_DATASET:-}",SWE_CONCURRENCY="${SWE_CONCURRENCY:-1}",SWE_VERIFY_GOLDEN="${SWE_VERIFY_GOLDEN:-false}" \
+  --export=ALL,RUN_DIR="/workspace/agent_run/results/$RUN_NAME",RL_ROOT=/workspace/nemo-rl,RL_COMMIT="$RL_COMMIT",GYM_COMMIT="$GYM_COMMIT",QWEN3_SWE2_GYM_VENV_DIR="$GYM_VENV_DIR",SWE_INSTANCE="$SWE_INSTANCE",NUM_PROMPTS="${NUM_PROMPTS:-1}",NUM_GENERATIONS="${NUM_GENERATIONS:-1}",SWE_DATASET="${SWE_DATASET:-}",SWE_CONCURRENCY="${SWE_CONCURRENCY:-1}",SWE_VERIFY_GOLDEN="${SWE_VERIFY_GOLDEN:-false}",GYM_RESULTS_HOST="$GYM_RESULTS_HOST" \
   --wrap="bash /workspace/agent_run/scripts/phase4/run_qwen3_swe2_tp2_e2e.sh"
 
 echo "run_dir=$HOST_RUN_DIR"
