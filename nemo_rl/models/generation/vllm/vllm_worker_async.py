@@ -910,6 +910,28 @@ class VllmAsyncGenerationWorkerImpl(
         # e.g. last-run middleware.
         app = FastAPI()
 
+        # vLLM Router uses GET /health while registering a dynamic backend.
+        @app.get("/health")
+        async def _health() -> dict[str, str]:
+            return {"status": "ok"}
+
+        if self.cfg["vllm_cfg"].get("enable_vllm_metrics_logger", False):
+            import re
+
+            from prometheus_client import make_asgi_app
+            from starlette.routing import Mount
+
+            from vllm.v1.metrics.prometheus import get_prometheus_registry
+
+            metrics_route = Mount(
+                "/metrics", make_asgi_app(registry=get_prometheus_registry())
+            )
+            # Same 307 workaround as vLLM's own
+            # entrypoints/serve/instrumentator/metrics.py: a bare Mount redirects
+            # /metrics to /metrics/.
+            metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
+            app.routes.append(metrics_route)
+
         app = self._setup_vllm_openai_api_server(app)
         if self._sparse_refit_receiver is not None:
             self._sparse_refit_receiver.setup_api_server(app)
