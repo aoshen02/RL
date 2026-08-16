@@ -60,11 +60,12 @@ policy:
     activation_checkpointing: false
     tensor_parallel_size: 1
   megatron_cfg:
+    tensor_model_parallel_size: 2
     checkpoint:
       async_save: true
     empty_unused_memory_level: 2
-    pipeline_model_parallel_size: 2
-    context_parallel_size: 4
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
     freeze_moe_router: true
     moe_router_bias_update_rate: 0.001
     moe_aux_loss_coeff: 0.0
@@ -197,8 +198,8 @@ policy:
     colocated:
       enabled: false
       resources:
-        gpus_per_node: 8
-        num_nodes: 8
+        gpus_per_node: 2
+        num_nodes: 1
 data:
   max_input_seq_length: null
   shuffle: false
