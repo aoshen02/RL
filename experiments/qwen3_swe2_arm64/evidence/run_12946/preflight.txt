@@ -1,0 +1,12 @@
+instance=django__django-16429   f2p=4  p2p=21   gold_lines=1   sif_mb=1067
+instance=django__django-17029   f2p=1  p2p=43   gold_lines=1   sif_mb=1046
+instance=django__django-16485   f2p=1  p2p=9    gold_lines=2   sif_mb=1046
+instance=django__django-16333   f2p=1  p2p=87   gold_lines=2   sif_mb=1067
+instance=django__django-14539   f2p=2  p2p=14   gold_lines=5   sif_mb=1030
+instance=django__django-16662   f2p=1  p2p=51   gold_lines=5   sif_mb=1046
+instance=django__django-14999   f2p=1  p2p=113  gold_lines=11  sif_mb=1067
+instance=django__django-15916   f2p=2  p2p=149  gold_lines=11  sif_mb=1067
+instance=django__django-15128   f2p=1  p2p=282  gold_lines=27  sif_mb=1066
+instance=django__django-12713   f2p=1  p2p=58   gold_lines=29  sif_mb=990
+n_instances=10
+dataset_name=princeton-nlp/SWE-bench_Verified

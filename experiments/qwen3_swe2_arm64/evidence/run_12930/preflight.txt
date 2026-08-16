@@ -1,0 +1,8 @@
+instance_id=django__django-17029
+dataset_name=princeton-nlp/SWE-bench_Verified
+base_commit=953f29f700a60fc09b08b2c2270c12c447490c6a
+fail_to_pass=["test_clear_cache (apps.tests.AppsTests.test_clear_cache)"]
+pass_to_pass_n=43
+gold_patch_lines=11
+sif=swebench_sweb.eval.arm64.django_1776_django-17029.sif
+sif_size=1097326592
