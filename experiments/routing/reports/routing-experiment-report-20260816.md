@@ -132,6 +132,39 @@ engine's tail sets the wall clock, so load spread converts directly into time.
 The none arm's worst wall (22:03) follows the same logic: static pinning plus
 per-process round-robin does no load balancing at all.
 
+### Concurrency sweep: the none arm degrades monotonically
+
+Same shape (610 sessions, 28 engines, group=1), only the concurrency cap changes:
+
+| Concurrency cap | cache_aware | consistent_hash | none |
+|---|---|---|---|
+| 112 | 18:57 / 93.5% | 20:26 / 93.5% | 22:03 / 85.6% |
+| uncapped (natural ceiling 610) | 13:47 / 91.7% | 12:39 / 91.6% | 13:13 / **76.1%** |
+
+1. **Strongest confirmation yet of the num_workers mechanism**: the none arm's gap
+   widens from 8 points to 15.6. Together with the 9B causal run, drift worsens
+   monotonically with concurrency — 9B c=8 loses 1.6pp, 120B c=112 loses 8pp,
+   120B uncapped loses 15.6pp. "num_workers > 1 is necessary, concurrency is the
+   amplifier" holds.
+2. **Wall clock stops discriminating at high concurrency**: all three arms land
+   within 12:39-13:47 and the order even inverts (ch fastest, ca slowest). The
+   bottleneck has moved upstream to the Gym policy_model layer (4 uvicorn
+   processes, ~24 req/s): in the router arms the engines idle most of the time
+   (610 rollouts dispatched, only 77-139 in flight engine-side). Idle engines
+   make load balancing worthless, and cache_aware's per-request radix-tree cost
+   becomes visible instead.
+3. **The none arm's 474 in-flight / 31% peak KV is a cost signal, not a
+   parallelism advantage**: all three arms sustain the same throughput, but 24%
+   of none's requests need a full 100K-token prefill, so per-request latency is
+   ~6x and steady-state in-flight follows (Little's law). Same wall clock, several
+   times the engine compute burned.
+
+**Methodological note**: c=112 is the correct operating point for measuring
+routing quality by wall clock (engines are the bottleneck there); uncapped
+concurrency saturates the upstream layer and only the hit rate stays meaningful.
+The headline table above stays on c=112. Peak KV never exceeded 31% and all arms
+recorded zero preemptions — no operating point triggered eviction.
+
 ### Two solved mysteries worth recording
 
 - **"Every hash key appears exactly twice"**: the router logs each request's

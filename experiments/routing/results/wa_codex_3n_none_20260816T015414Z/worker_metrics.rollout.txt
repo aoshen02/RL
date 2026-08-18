@@ -2,6 +2,7 @@
 vllm:prefix_cache_queries_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 9.3006553e+07
 vllm:prefix_cache_hits_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 8.663792e+07
 vllm:num_preemptions_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
+vllm:prompt_tokens_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 8.9822247e+07
 vllm:request_success_total{engine="0",finished_reason="stop",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
 vllm:request_success_total{engine="0",finished_reason="length",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1154.0
 vllm:request_success_total{engine="0",finished_reason="abort",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
@@ -11,6 +12,7 @@ vllm:request_success_total{engine="0",finished_reason="repetition",model_name="n
 vllm:prefix_cache_queries_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.08410281e+08
 vllm:prefix_cache_hits_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.02738784e+08
 vllm:num_preemptions_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
+vllm:prompt_tokens_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.05978589e+08
 vllm:request_success_total{engine="0",finished_reason="stop",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
 vllm:request_success_total{engine="0",finished_reason="length",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1343.0
 vllm:request_success_total{engine="0",finished_reason="abort",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
@@ -20,6 +22,7 @@ vllm:request_success_total{engine="0",finished_reason="repetition",model_name="n
 vllm:prefix_cache_queries_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.23855337e+08
 vllm:prefix_cache_hits_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.16857216e+08
 vllm:num_preemptions_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
+vllm:prompt_tokens_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.20595435e+08
 vllm:request_success_total{engine="0",finished_reason="stop",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
 vllm:request_success_total{engine="0",finished_reason="length",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1442.0
 vllm:request_success_total{engine="0",finished_reason="abort",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
@@ -29,6 +32,7 @@ vllm:request_success_total{engine="0",finished_reason="repetition",model_name="n
 vllm:prefix_cache_queries_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.08075093e+08
 vllm:prefix_cache_hits_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.01951584e+08
 vllm:num_preemptions_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
+vllm:prompt_tokens_total{engine="0",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1.0500136e+08
 vllm:request_success_total{engine="0",finished_reason="stop",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
 vllm:request_success_total{engine="0",finished_reason="length",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 1341.0
 vllm:request_success_total{engine="0",finished_reason="abort",model_name="nvidia/NVIDIA-Nemotron-Nano-9B-v2"} 0.0
