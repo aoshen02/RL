@@ -24,8 +24,22 @@ policy, engine count, and the in-flight rollout cap
 | 12 | uncapped | none | **50:33** | 5.61 | 12.3% |
 | 12 | uncapped | none (repeat) | 46:11 | 5.50 | 13.4% |
 | 12 | 48 | none | 41:19 | 1.05 | 88.0% |
+| 12 | uncapped | none, stable hash | 15:51 | 1.12 | 91.8% |
 
-Three things follow, in order of how much they change the reading:
+Four things follow, in order of how much they change the reading:
+
+**0. The `none` collapse was a Gym bug that upstream has since fixed.**
+`vllm_model` assigned a session to an engine with a per-process counter
+(`len(self._session_id_to_client) % len(self._clients)`), so with
+`num_workers > 1` the same session landed on a different engine in each uvicorn
+worker and its prefix was never where the next turn looked for it.
+[Gym c84b7ed4](https://github.com/NVIDIA-NeMo/Gym/commit/c84b7ed4) (2026-08-07)
+replaced it with `sha256(session_id) % len(clients)`, which is stable across
+processes. Applying just those five lines to the collapsed configuration --
+same image, same 12 engines, same uncapped 610 sessions, byte-identical
+workload counters -- takes it from 50:33 / 12.3% to **15:51 / 91.8%**, level
+with the routed arms. Every `none` row above except that one was produced by
+the pre-fix code and measures the bug, not the policy.
 
 **1. `none` degrades gracefully until the system saturates, then collapses.**
 At 28 engines with no cap it costs 76.1% versus 91.7% on cache locality but
@@ -110,10 +124,12 @@ Inside any run directory:
   (`routing_postcheck.sh`), timeline sampler (`watch_router.sh`), dataset
   builder (`build_codex_replay_dataset.py`), run curation
   (`curate_run.sh`, raw run directory -> the compact form kept here).
-- `results/` — 17 golden runs:
+- `results/` — 18 golden runs:
   - 120B / 28 engines, capped and uncapped, three arms each;
-  - 120B / 12 engines, uncapped, three arms, plus the collapsed-case repeat and
-    the capped-at-48 rescue;
+  - 120B / 12 engines, uncapped, three arms, plus the collapsed-case repeat, the
+    capped-at-48 rescue, and the stable-hash rerun
+    (`wa_codex_8n_none_stablehash_20260818T101036Z`, the collapsed configuration
+    with Gym c84b7ed4's five lines applied and nothing else changed);
   - 9B post-fix parity arms (`wa_codex_3n_*_1517*Z`), the 9B decision-log
     evidence arms (cache_aware `142909Z` with 1,322 decisions; consistent_hash
     `151650Z` with 16 keys = 16 sessions), and the num_workers causal run
@@ -125,6 +141,14 @@ can be rebuilt from the source pool with `scripts/build_codex_replay_dataset.py`
 
 ## Open cells
 
-The grid is complete except for **12 engines x cap 48 x the two routed
-policies**. Without those the cap's effect at 12 engines is measured only for
-`none`.
+Two gaps:
+
+- **12 engines x cap 48 x the two routed policies.** Without them the cap's
+  effect at 12 engines is measured only for `none`.
+- **Routed arms on post-fix Gym.** The stable-hash rerun shows `none` reaching
+  91.8% / 15:51, which is `consistent_hash` (91.8% / 15:39) to within the
+  12.8-16.7% node-to-node range measured for this workload. `cache_aware`'s
+  13:57 is 12% faster than both, but it was measured on pre-fix Gym, is a single
+  unreplicated run, and does not come with a higher hit rate (91.6%) that would
+  explain it. Deciding whether that 12% is real needs `cache_aware` and the
+  stable-hash arm rerun against each other on the same code.
