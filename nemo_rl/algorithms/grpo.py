@@ -621,8 +621,12 @@ def setup(
             "policy.generation.server_groups does not support cluster.segment_size"
         )
 
-    def _spinup_nemo_gym(base_urls, model_name):
-        """Spin up the NeMo Gym actor against the given generation server URLs."""
+    def _spinup_nemo_gym(base_urls, model_name, generation=None):
+        """Spin up the NeMo Gym actor against the given generation server URLs.
+
+        ``generation`` only supplies the URL->group mapping; backends without
+        groups register their replicas unlabelled.
+        """
         t0 = time.perf_counter()
         enable_router_replay = router_replay_enabled(policy_config)
         routed_experts_dtype = (
@@ -633,6 +637,9 @@ def setup(
         actor = spinup_nemo_gym_actor(
             env_configs=env_configs,
             base_urls=base_urls,
+            base_url_groups=getattr(
+                generation, "dp_openai_server_base_urls_by_group", None
+            ),
             model_name=model_name,
             enable_router_replay=enable_router_replay,
             routed_experts_dtype=routed_experts_dtype,
@@ -1184,6 +1191,7 @@ def setup(
             nemo_gym_actor, nemo_gym_time = _spinup_nemo_gym(
                 policy_generation.dp_openai_server_base_urls,
                 generation_config["model_name"],
+                generation=policy_generation,
             )
             worker_init_timing_metrics["nemo_gym_init_time_s"] = nemo_gym_time
 
@@ -1281,6 +1289,7 @@ def setup(
                 return _spinup_nemo_gym(
                     deferred_vllm.dp_openai_server_base_urls,
                     generation_config["model_name"],
+                    generation=deferred_vllm,
                 )
 
             # Colocated: vLLM + policy share GPUs -> sequential; otherwise parallel.
@@ -1381,6 +1390,7 @@ def setup(
             nemo_gym_actor, nemo_gym_time = _spinup_nemo_gym(
                 policy_generation.dp_openai_server_base_urls,
                 generation_config["model_name"],
+                generation=policy_generation,
             )
             worker_init_timing_metrics["nemo_gym_init_time_s"] = nemo_gym_time
 

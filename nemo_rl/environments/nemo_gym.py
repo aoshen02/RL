@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import contextlib
 import json
 import math
 import os
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from collections import Counter
 from collections.abc import AsyncGenerator
@@ -62,6 +65,8 @@ _ROUTED_EXPERTS_DTYPES = {
     "int16": torch.int16,
     "int32": torch.int32,
 }
+
+DEFAULT_TAIL_ROUTE_GROUP = "low_latency"
 
 DEFAULT_INVALID_TOOL_CALL_PATTERNS = [
     "<tool_call>",
@@ -141,6 +146,9 @@ def get_nemo_gym_venv_dir() -> str | None:
 class NemoGymConfig(TypedDict):
     model_name: str
     base_urls: List[str]
+    # {group_name: [base_url, ...]}, used to label each replica at router
+    # registration. Absent means one unnamed pool.
+    base_url_groups: NotRequired[dict[str, List[str]] | None]
     initial_global_config_dict: Dict[str, Any]
     # Port range for Gym HTTP servers (head server + subprocess servers).
     # Defaults to DEFAULT_GYM_PORT_RANGE_LOW/HIGH (5000-5999) from
@@ -169,6 +177,17 @@ class NemoGymConfig(TypedDict):
     pad_dynamic_image_shapes: NotRequired[
         bool
     ]  # Normalize heterogeneous image tensors while retaining exact imgs_sizes
+    # Cap on rollouts in flight. Unset means the whole batch is dispatched at once,
+    # which with long prompts can stall a replica's HTTP server long enough that new
+    # connections time out and a router takes the replica out of rotation. Steering
+    # only reaches requests not yet dispatched, so this cap is what makes the tail
+    # steerable at all.
+    max_concurrent_rollouts: NotRequired[int | None]
+    # Fraction of a step's rollouts that must finish before the rest are steered to
+    # tail_route_group. Unset disables steering.
+    tail_route_threshold: NotRequired[float | None]
+    # Server group the tail is steered to; must match a server_groups entry.
+    tail_route_group: NotRequired[str]
 
 
 def _detect_invalid_tool_call_and_malformed_thinking(
@@ -438,6 +457,9 @@ class NemoGym(EnvironmentInterface):
                 "_attach_multimodal_data_to_user_message before enabling."
             )
 
+        self._tail_sentinel: str | None = None
+        self._tail_group: str = cfg.get("tail_route_group", DEFAULT_TAIL_ROUTE_GROUP)
+
     def _require_spinup(self) -> None:
         """Raise a diagnosable error if this instance never ran :meth:`_spinup`."""
         if self.rh is None:
@@ -459,6 +481,17 @@ class NemoGym(EnvironmentInterface):
         self._require_spinup()
         self.rh.poll()
 
+    def _tail_route(self, on: bool) -> None:
+        """Publish the tail-steering signal. Off at the start of every step."""
+        if not self._tail_sentinel:
+            return
+        if on:
+            with open(self._tail_sentinel, "w") as f:
+                f.write("1")
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(self._tail_sentinel)
+
     def _spinup(self) -> None:
         """Start the NeMo-Gym head server and rollout collection helper.
 
@@ -467,6 +500,18 @@ class NemoGym(EnvironmentInterface):
         server URLs are available, overlapping with vLLM model loading.
         """
         self.node_ip = _get_node_ip_local()
+        # A sentinel file rather than server state: vllm_model runs several uvicorn
+        # workers that share no memory, so a server-side switch would flip in only
+        # one of them. Gym servers are spawned from here and inherit this environment.
+        if self.cfg.get("tail_route_threshold") is not None:
+            log_dir = (self.cfg.get("initial_global_config_dict") or {}).get(
+                "nemo_gym_log_dir"
+            ) or tempfile.gettempdir()
+            os.makedirs(log_dir, exist_ok=True)
+            self._tail_sentinel = os.path.join(log_dir, "tail_route.on")
+            self._tail_route(False)
+            os.environ["NEMO_GYM_TAIL_ROUTE_SENTINEL"] = self._tail_sentinel
+            os.environ["NEMO_GYM_TAIL_ROUTE_GROUP"] = self._tail_group
         _gym_port_low = self.cfg.get("port_range_low", DEFAULT_GYM_PORT_RANGE_LOW)
         _gym_port_high = self.cfg.get("port_range_high", DEFAULT_GYM_PORT_RANGE_HIGH)
         self.head_server_port = _get_free_port_local(_gym_port_low, _gym_port_high)
@@ -494,13 +539,36 @@ class NemoGym(EnvironmentInterface):
             "dummy_key"  # No key necessary for training.
         )
         router_url = initial_global_config_dict.pop("router_url", None)
+        # Warm every replica before it takes traffic: the first request spends
+        # seconds compiling Triton kernels, long enough to time out a rollout.
+        # Best effort -- a backend without /warmup just pays the cost later.
+        for base_url in filter(None, self.cfg["base_urls"]):
+            with contextlib.suppress(OSError):
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{base_url.removesuffix('/v1')}/warmup", method="POST"
+                    ),
+                    timeout=600,
+                ).close()
         if router_url:
+            # Which group each replica belongs to, so the router can honour a
+            # request that asks for one by name. Empty when the backend runs a
+            # single unnamed pool.
+            group_of: dict[str, str] = {
+                url: name
+                for name, urls in (self.cfg.get("base_url_groups") or {}).items()
+                for url in urls
+                if url
+            }
             # POST /workers blocks until the router's own health probe of the
             # replica succeeds, so a 200 means registered and routable.
             for base_url in filter(None, self.cfg["base_urls"]):
+                payload: dict[str, Any] = {"url": base_url.removesuffix("/v1")}
+                if base_url in group_of:
+                    payload["labels"] = {"group": group_of[base_url]}
                 request = urllib.request.Request(
                     f"{router_url.removesuffix('/v1')}/workers",
-                    data=json.dumps({"url": base_url.removesuffix("/v1")}).encode(),
+                    data=json.dumps(payload).encode(),
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
@@ -594,8 +662,20 @@ Depending on your data shape, you may want to change these values."""
         encode_images_in_examples(nemo_gym_examples)
 
         timer.start("_run_rollouts_total")
+        limit = self.cfg.get("max_concurrent_rollouts")
         nemo_gym_result_iterator = self.rch.run_examples(
-            examples=nemo_gym_examples, head_server_config=self.head_server_config
+            examples=nemo_gym_examples,
+            head_server_config=self.head_server_config,
+            semaphore=asyncio.Semaphore(limit) if limit else None,
+        )
+
+        # Steering is within-step state: every step starts off and flips once.
+        self._tail_route(False)
+        tail_threshold = self.cfg.get("tail_route_threshold")
+        tail_at = (
+            math.ceil(tail_threshold * len(nemo_gym_examples))
+            if tail_threshold is not None
+            else None
         )
 
         num_results = 0
@@ -629,6 +709,13 @@ Depending on your data shape, you may want to change these values."""
                     raise RuntimeError("Generation logprobs contain NaN")
 
             num_results += 1
+            if tail_at is not None and num_results == tail_at:
+                self._tail_route(True)
+                print(
+                    f"[tail-route] {num_results}/{len(nemo_gym_examples)} rollouts done; "
+                    f"steering the remainder to server group '{self._tail_group}'",
+                    flush=True,
+                )
             timing_metrics = None
             if num_results == len(nemo_gym_examples):
                 timer.stop("_run_rollouts_total")
@@ -1035,11 +1122,51 @@ def setup_nemo_gym_config(config, tokenizer) -> None:
         env_cfg.setdefault("tokenizer_config", dict(config.policy["tokenizer"]))
 
 
+def _validate_tail_route(
+    threshold: float,
+    group: str,
+    base_url_groups: dict[str, list[str]] | None,
+    *,
+    router_url: str | None,
+    policy_model: Any,
+) -> None:
+    """Fail at setup when tail steering cannot possibly take effect.
+
+    Every one of these misconfigurations is otherwise silent: the rollout runs,
+    the flip is logged, and the requests go exactly where they always went.
+    """
+    if not 0 < threshold <= 1:
+        raise ValueError(f"tail_route_threshold must be in (0, 1], got {threshold!r}")
+    if not router_url:
+        raise ValueError("tail_route_threshold requires env.nemo_gym.router_url")
+    if not base_url_groups:
+        raise ValueError(
+            "tail_route_threshold requires policy.generation.server_groups; "
+            "without groups there is nowhere to steer to"
+        )
+    if group not in base_url_groups:
+        raise ValueError(
+            f"tail_route_group '{group}' is not a server group: "
+            f"{sorted(base_url_groups)}"
+        )
+    header = (
+        ((policy_model or {}).get("responses_api_models") or {})
+        .get("vllm_model", {})
+        .get("worker_group_header")
+    )
+    if not header:
+        raise ValueError(
+            "tail_route_threshold requires policy_model.responses_api_models."
+            "vllm_model.worker_group_header; without it no request is tagged"
+        )
+
+
 def spinup_nemo_gym_actor(
     env_configs: dict[str, Any],
     base_urls: list[str],
     model_name: str,
     *,
+    base_url_groups: dict[str, list[str]] | None = None,
     enable_router_replay: bool,
     routed_experts_dtype: str,
     use_fastokens: bool,
@@ -1080,6 +1207,17 @@ def spinup_nemo_gym_actor(
         _value = nemo_gym_dict.pop(_flag, None)
         if _value is not None:
             multimodal_flags[_flag] = bool(_value)
+    max_concurrent_rollouts = nemo_gym_dict.pop("max_concurrent_rollouts", None)
+    tail_route_threshold = nemo_gym_dict.pop("tail_route_threshold", None)
+    tail_route_group = nemo_gym_dict.pop("tail_route_group", DEFAULT_TAIL_ROUTE_GROUP)
+    if tail_route_threshold is not None:
+        _validate_tail_route(
+            tail_route_threshold,
+            tail_route_group,
+            base_url_groups,
+            router_url=nemo_gym_dict.get("router_url"),
+            policy_model=nemo_gym_dict.get("policy_model"),
+        )
 
     # Pass prebuilt cache + venv dirs through the global config so the gym reuses
     # image-baked venvs instead of rebuilding them.
@@ -1093,12 +1231,16 @@ def spinup_nemo_gym_actor(
     nemo_gym_cfg = NemoGymConfig(
         model_name=model_name,
         base_urls=base_urls,
+        base_url_groups=base_url_groups,
         invalid_tool_call_patterns=invalid_tool_call_patterns,
         thinking_tags=thinking_tags,
         tokenizer_config=tokenizer_config,
         require_routed_experts=enable_router_replay,
         routed_experts_dtype=routed_experts_dtype,
         use_fastokens=use_fastokens,
+        max_concurrent_rollouts=max_concurrent_rollouts,
+        tail_route_threshold=tail_route_threshold,
+        tail_route_group=tail_route_group,
         initial_global_config_dict=nemo_gym_dict,
         **multimodal_flags,
     )
