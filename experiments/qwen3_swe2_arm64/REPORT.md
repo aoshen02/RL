@@ -1,44 +1,48 @@
-# 单节点 GB200(ARM64)跑通 NeMo-RL 旗舰 SWE2 recipe
+# NeMo-RL flagship SWE2 recipe, end to end on one ARM64 GB200 node
 
-一个 GB200 节点(4 GPU,aarch64)端到端跑通:
-`NeMo-RL(Megatron)→ NeMo-Gym → vLLM → OpenHands → ARM64 SWE 沙盒 → SWE-bench 评测 → reward → replay buffer → 一个训练步`。数字均可追溯到 `agent_run/results/` 下的运行目录。
+One GB200 node (4 GPUs, aarch64) running the full chain:
+`NeMo-RL (Megatron) → NeMo-Gym → vLLM → OpenHands → ARM64 SWE sandbox → SWE-bench eval → reward → replay buffer → one training step`. Every number below traces to a run directory under `agent_run/results/`.
 
-## 改动(核心修复在 Gym,不在 NeMo-RL)
+## Changes (the real fix is in Gym, not NeMo-RL)
 
-**阻断性 bug**:`openhands.sh` 硬编码下载 `jq-linux-amd64`。aarch64 上下载成功、setup 全绿,但该二进制拷进 SWE 容器后 `Exec format error`;启动脚本查询返回空并 `exit 1`,而它是被 **source** 的,于是杀死调用者 shell。OpenHands 只看到 `command timed out after 600.0 seconds`,重试 3 次 = 每条 rollout 白等 1800s。**表面是超时,真实故障在第 0 秒。** 改法:按 `uname -m` 分发;二进制跑不起来就重下;去掉 `jq --version || true` —— 正是它把错误吞掉。
+**Blocking bug.** `openhands.sh` hardcodes `jq-linux-amd64`. On aarch64 the download succeeds and setup looks green, but the binary is copied into the SWE container where it dies with `Exec format error`. The entry script's instance lookup then returns nothing and hits `exit 1` — and because the runtime *sources* that script, it kills the caller's shell. OpenHands only sees `command timed out after 600.0 seconds`, three retries, 1800s wasted per rollout. **The symptom is a timeout; the failure happens at second zero.** Fix: dispatch on `uname -m`; re-download when the existing binary cannot execute; drop `jq --version || true`, which is what swallowed the error in the first place.
 
-**优化**:`NEMO_GYM_SWE_NO_COPY=1` 把 `cp -al /testbed` 换成 `ln -s`。容器可写层是 RAM-backed,递归复制费时费内存。安全性来自 `--writable-tmpfs`(SIF 只读共享,每容器一份内存 overlay)—— 实测同题两条并发 rollout 产出了不同 patch。 分支:`aoshen02/Gym` @ `fix/swe-arm64-jq`(`openhands.sh` +17 −4,`swe_agents/app.py` +62)· `aoshen02/RL` @ `review/qwen3-swe2-singlenode`(脚手架/文档/证据)。
+**Optimization.** `NEMO_GYM_SWE_NO_COPY=1` replaces `cp -al /testbed` with `ln -s`. The container's writable layer is RAM-backed, so the recursive copy costs both time and memory. It is safe because of `--writable-tmpfs`: the SIF is shared read-only and each container gets its own in-memory overlay — measured directly, two concurrent rollouts of the same instance produced different patches. Branches: `aoshen02/Gym` @ `fix/swe-arm64-jq` (`openhands.sh` +17 −4, `swe_agents/app.py` +62) · `aoshen02/RL` @ `review/qwen3-swe2-singlenode` (harness, docs, evidence).
 
-## 配置与数据
+## Setup and data
 
-`Qwen3-30B-A3B-Thinking-2507`(MoE)· recipe `grpo_qwen3_30ba3b_thinking_swe2.yaml` · 训练 Megatron TP2/PP1/CP1/EP1(optimizer 全量 CPU offload)· 生成 vLLM TP2 non-colocated async,`max_model_len=32768` · Agent 是 **OpenHands**(Gym 默认,`CodeActAgent`,200 轮上限),评测是官方 `swebench.harness.run_local_evaluation`,两者完全分离。数据:`SWE-bench_Verified` 的 **10 个 django 题**,按金 patch 规模分层(1~29 行),不是全挑简单题;每题一个 ARM64 SIF,由 `docker://swebench/sweb.eval.arm64.<id>` 零定制转换。GRPO:10 prompt × 2 采样 = 20 条 rollout,`max_num_steps=1`,沙盒并发 10。
+`Qwen3-30B-A3B-Thinking-2507` (MoE) · recipe `grpo_qwen3_30ba3b_thinking_swe2.yaml` · training Megatron TP2/PP1/CP1/EP1 with full optimizer CPU offload · generation vLLM TP2, non-colocated, async engine, `max_model_len=32768` · the agent is **OpenHands** (Gym's default; `CodeActAgent`, 200-turn cap) and the evaluator is upstream `swebench.harness.run_local_evaluation` — the two are fully separate.
 
-## 结果
+Data: **10 django instances** from `SWE-bench_Verified`, stratified by gold-patch size (1–29 lines) rather than cherry-picked easy ones. One ARM64 SIF per instance, converted straight from `docker://swebench/sweb.eval.arm64.<id>` with no customisation. GRPO: 10 prompts × 2 samples = 20 rollouts, `max_num_steps=1`, sandbox concurrency 10.
 
-同一配置跑了三次,全部 `exit_code=0`,reward mean 分别 **0.5000 / 0.4500 / 0.3000**(resolved 10/20、9/20、6/20)—— n=20 下的采样波动。以最近一次 13206 为准:reward `min 0.0 / max 1.0 / mean 0.5000 / std 0.5130`,resolved **10/20**,冷启动全程 14m53s。
+## Results
 
-通过率随金 patch 规模**单调下降**:1–2 行 6/8 · 5 行 2/4 · 11–29 行 2/8。**advantage 非零**(`±0.7071, std 0.3162`),说明这一步有真实梯度 —— 组内有对有错才有信号;若全对或全错则 advantage 恒为 0,链路再通也是零更新。
+Three runs of the same configuration, all `exit_code=0`, reward mean **0.5000 / 0.4500 / 0.3000** (resolved 10/20, 9/20, 6/20) — sampling spread at n=20. Taking the latest (13206): reward `min 0.0 / max 1.0 / mean 0.5000 / std 0.5130`, resolved **10/20**, 14m53s wall clock.
 
-**reward 不是 hack**:① agent 与评测容器挂的 `/root/dataset/data.jsonl` 是两个不同文件,agent 那份 925B、`patch`/`test_patch`/`FAIL_TO_PASS`/`PASS_TO_PASS` 全 ABSENT;② 镜像里没有目标测试,20 条 rollout `touched_tests=0`;③ `eval.sh` 先 `git checkout <base_commit> tests/...` 再打 `test_patch`,源码侧只应用**模型的** patch;④ 一条缩进损坏的 patch 被正确判 `resolved=False`。难度单调下降本身也是泄漏做不到的。
+Pass rate falls **monotonically** with gold-patch size: 1–2 lines 6/8 · 5 lines 2/4 · 11–29 lines 2/8. **Advantage is non-zero** (`±0.7071, std 0.3162`), so this step carries real gradient — a group needs both successes and failures to produce signal; an all-pass or all-fail group has advantage 0 and updates nothing no matter how healthy the chain is.
 
-## 复现
+**The reward is not hacked**: ① the `/root/dataset/data.jsonl` mounted into the agent container and into the eval container are two different files — the agent's is 925B with `patch`, `test_patch`, `FAIL_TO_PASS` and `PASS_TO_PASS` all absent; ② the target test is not in the image, and all 20 rollouts show `touched_tests=0`; ③ `eval.sh` does `git checkout <base_commit> tests/...` before applying `test_patch`, and only the *model's* patch reaches the source tree; ④ a patch with broken indentation was correctly scored `resolved=False`. The monotonic difficulty curve is itself something a leak could not produce.
+
+## Reproduce
 
 ```bash
 git clone https://github.com/aoshen02/RL  -b review/qwen3-swe2-singlenode
 git clone https://github.com/aoshen02/Gym -b fix/swe-arm64-jq <RL>/3rdparty/Gym-workspace/Gym
 cd <RL>/experiments/qwen3_swe2_arm64
-bash   scripts/build_swe_sif_arm64.sh   django__django-17029          # 造 SIF,~2 分钟
+bash   scripts/build_swe_sif_arm64.sh   django__django-17029          # build the SIF, ~2 min
 python scripts/make_swe2_dataset_row.py django__django-17029 data/django17029_swe2.jsonl
-bash   scripts/prewarm_nemo_gym_qwen3_swe2.sh                          # 预热 venv,须串行
+bash   scripts/prewarm_nemo_gym_qwen3_swe2.sh                          # prewarm venvs, must be serial
 
 SWE_DATASET=/workspace/agent_run/data/qwen3_swe2_smoke/django_mix10_swe2.jsonl \
 NUM_PROMPTS=10 NUM_GENERATIONS=2 SWE_CONCURRENCY=10 \
   bash scripts/launch_qwen3_swe2_tp2_e2e.sh
-bash handoff_qwen3_swe2_cold_start.sh --verify [run_dir]   # 0=全过 1=有必需项未过 2=用法错误
+bash handoff_qwen3_swe2_cold_start.sh --verify [run_dir]   # 0=all required pass, 1=some failed, 2=usage error
 ```
 
-前置:Slurm + pyxis/enroot,1 节点 4 GPU(aarch64),镜像 `nemo-rl-vllm-latest.sqsh`。dockerhub 上 arm64 只覆盖**部分** instance(django 约 141 个),不存在的返回 401。可选:`SWE_INSTANCE=` 单题 · `GYM_DIR=` 换代码源而不动主工作区 · `SWE_VERIFY_GOLDEN=1` 用金 patch 校准评测链路(**校准非交付**)。并发取 10 而非 20:沙盒实测 1.1–1.6 GB/个,但 `apptainer_memory_limit_mb=32768` 在 enroot 里**无 cgroup 硬限**、仅 watchdog 软执行,最坏是 `并发 × 32 GB`;内存大头在训练侧,节点 893 GB 驻留后约剩 185 GB。
+Prerequisites: Slurm + pyxis/enroot, one node with 4 GPUs (aarch64), image `nemo-rl-vllm-latest.sqsh`. Docker Hub's arm64 images cover only **part** of the benchmark (~141 django instances); missing ones return 401. Optional: `SWE_INSTANCE=` for a single instance · `GYM_DIR=` to point at a different Gym tree without touching the main checkout · `SWE_VERIFY_GOLDEN=1` to calibrate the eval chain with the gold patch (**calibration, not a deliverable**). Concurrency is 10 rather than 20: a sandbox measures 1.1–1.6 GB, but `apptainer_memory_limit_mb=32768` has **no cgroup enforcement** under enroot and is only watchdog-polled, so the worst case is `concurrency × 32 GB`; the bulk of memory sits on the training side, leaving ~185 GB of the node's 893 GB once it is resident.
 
-## 边界
+## Limits
 
-**支撑的结论只有一句:上述链路完整跑通且 `exit_code=0`。** 它不证明:不是模型能力评估(10 题 × 2 采样);不是训练有效性验证(`max_num_steps=1`,无收敛、无多步);证据链 item 3/4/5/8 **只覆盖 20 条 rollout 中的 1 条**(收集器取 `head -1`),只有聚合项覆盖全部;item 6 恒为 NO 且被豁免(OpenHands 自身 `output.jsonl` 恒 0 字节,轨迹改由 item 7 从 `train_data_step*.jsonl` 解码);**只在 aarch64 验证过,合上游前需 x86 回归**。 已知偶发:job 13204 两个 vLLM TP worker 被系统杀掉(`SYSTEM_ERROR` → `Executor failed.`),同节点同代码重跑通过,判为基础设施偶发。Slurm 的 `batch` 分区是 `OverSubscribe=EXCLUSIVE`,每作业独占整节点 —— N 个小作业 = N 倍墙钟。详见 `ROOT_CAUSE_swe_entry_600s_timeout.md`(jq 推理链,含两次自我更正)· `ROOT_CAUSE_vllm_enginedead_keyerror.md`(`mamba_cache_mode` 继承链陷阱,含一处撤回的错误归因)· `REWARD1_EVIDENCE.md`(含「被证伪的假设」9 条)· `AUDIT.md`(独立审计,含校验器自身的假阳性与假阴性)。
+**The only claim this supports is that the chain above completed with `exit_code=0`.** It is not a model-capability evaluation (10 instances × 2 samples); it is not evidence that training works (`max_num_steps=1`, no convergence, no multi-step); evidence items 3/4/5/8 **cover 1 of the 20 rollouts** (the collector takes `head -1`) and only the aggregate items cover all of them; item 6 is permanently NO and exempted (OpenHands' own `output.jsonl` is always 0 bytes on this path, so the trajectory comes from item 7, decoded from `train_data_step*.jsonl`); and **this was only validated on aarch64 — an x86 regression is required before upstreaming**. One transient failure is on record: job 13204 lost two vLLM TP workers to the system (`SYSTEM_ERROR` → `Executor failed.`); the same code on the same node passed on retry, so it is logged as infrastructure flake. Note also that the `batch` partition is `OverSubscribe=EXCLUSIVE` — every job takes a whole node, so N small jobs cost N times the wall clock.
+
+See `ROOT_CAUSE_swe_entry_600s_timeout.md` (the jq chain, including two self-corrections) · `ROOT_CAUSE_vllm_enginedead_keyerror.md` (`mamba_cache_mode` inheritance trap, including one retracted attribution) · `REWARD1_EVIDENCE.md` (with 9 falsified hypotheses) · `AUDIT.md` (independent audit, including the verifier's own false positives and negatives).
