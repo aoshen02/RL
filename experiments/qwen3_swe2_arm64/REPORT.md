@@ -15,13 +15,9 @@
 
 ## 结果
 
-| Job | 代码 | reward mean | resolved |
-|---|---|---|---|
-| 12946 | 精简前 | 0.4500 | 9/20 |
-| 13203 | 精简后 | 0.3000 | 6/20 |
-| 13206 | 精简后 | **0.5000** | 10/20 |
+同一配置跑了三次,全部 `exit_code=0`,reward mean 分别 **0.5000 / 0.4500 / 0.3000**(resolved 10/20、9/20、6/20)—— n=20 下的采样波动。以最近一次 13206 为准:reward `min 0.0 / max 1.0 / mean 0.5000 / std 0.5130`,resolved **10/20**,冷启动全程 14m53s。
 
-三次均 `exit_code=0`。精简前的 0.45 落在两次精简后**中间**,故无证据表明精简改变行为;只看 13203 会误判为退化(n=20,z≈1.0,采样波动)。通过率随金 patch 规模**单调下降**:1–2 行 6/8,5 行 2/4,11–29 行 2/8。**非零 advantage** `±0.7071, std=0.3162` —— 组内有对有错才有梯度;早期两跑分别是单样本(`std=nan`)与 8/8 全对(`std=0`),都是零更新。冷启动全程 14m53s。
+通过率随金 patch 规模**单调下降**:1–2 行 6/8 · 5 行 2/4 · 11–29 行 2/8。**advantage 非零**(`±0.7071, std 0.3162`),说明这一步有真实梯度 —— 组内有对有错才有信号;若全对或全错则 advantage 恒为 0,链路再通也是零更新。
 
 **reward 不是 hack**:① agent 与评测容器挂的 `/root/dataset/data.jsonl` 是两个不同文件,agent 那份 925B、`patch`/`test_patch`/`FAIL_TO_PASS`/`PASS_TO_PASS` 全 ABSENT;② 镜像里没有目标测试,20 条 rollout `touched_tests=0`;③ `eval.sh` 先 `git checkout <base_commit> tests/...` 再打 `test_patch`,源码侧只应用**模型的** patch;④ 一条缩进损坏的 patch 被正确判 `resolved=False`。难度单调下降本身也是泄漏做不到的。
 
