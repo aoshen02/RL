@@ -1,0 +1,174 @@
+# syntax=docker/dockerfile:1.7
+# NeMo-RL with a Megatron Lite policy for Nemotron-H true-on-policy GRPO
+# (examples/run_nemotron_h_lightning_nvfp4_mlite_true_on_policy.sh).
+#
+# BASE_IMAGE is the Nemotron-H true-on-policy image built from verl's
+# docker/Dockerfile.nemotron_h_true_on_policy: it carries the vLLM wheel, the
+# Megatron-LM/Megatron Lite install, the Mamba kernels and DeepEP. This file
+# moves vLLM's Python sources to VLLM_REVISION (the diff from the base's vLLM
+# must be Python-only), reinstalls Megatron-LM, Megatron Lite and nemorl_mlite
+# at MEGATRON_REVISION, installs ModelOpt and the packages NeMo-RL needs on top,
+# and adds this NeMo-RL checkout at /opt/nemo-rl. Nothing is mounted at run time
+# besides weights, data and outputs.
+#
+#   docker build -f docker/Dockerfile.nemotron_h_mlite_true_on_policy \
+#     --build-arg BASE_IMAGE=<nemotron-h-true-on-policy image> -t nemorl-nemotron-h-mlite .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG VLLM_REPO=https://github.com/aoshen02/vllm.git
+ARG VLLM_REF=refs/heads/pr/nemotron-h-bi-cutedsl-p6
+ARG VLLM_REVISION=7a0244d0dc1af4b1cff9112f20b6e5f45ccbe90a
+ARG MEGATRON_REPO=https://github.com/aoshen02/Megatron-LM.git
+ARG MEGATRON_REVISION=de71220511239827f737083d76bbbc613d7e5148
+ARG MODELOPT_VERSION=0.47.0
+
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 \
+    NEMO_RL_PY_EXECUTABLES_SYSTEM=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
+
+COPY . /opt/nemo-rl
+
+# -----------------------------------------------------------------------------
+# vLLM Python sources at VLLM_REVISION, over the base image's vLLM wheel
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+base_rev=$(python -c 'import json; print(json.load(open("/opt/nemotron/image-manifest.json"))["vllm_revision"])')
+git init /tmp/vllm
+git -C /tmp/vllm remote add origin "${VLLM_REPO}"
+git -C /tmp/vllm fetch --no-tags --filter=blob:none origin "${VLLM_REF}"
+git -C /tmp/vllm checkout --detach "${VLLM_REVISION}"
+test "$(git -C /tmp/vllm rev-parse HEAD)" = "${VLLM_REVISION}"
+git -C /tmp/vllm diff --name-only "${base_rev}" "${VLLM_REVISION}" -- vllm >/tmp/vllm-files.txt
+# Compiled code must not change: the base image's extensions stay as built.
+if grep -v '\.py$' /tmp/vllm-files.txt; then exit 1; fi
+site=$(python -c 'import site; print(site.getsitepackages()[0])')
+python - "${site}" /tmp/vllm-files.txt /tmp/vllm <<'PY'
+import base64
+import csv
+import glob
+import hashlib
+import io
+import os
+import shutil
+import sys
+
+site, listing, src = sys.argv[1:]
+(record,) = glob.glob(os.path.join(site, "vllm-*.dist-info/RECORD"))
+rows = list(csv.reader(open(record)))
+index = {row[0]: i for i, row in enumerate(rows)}
+for name in filter(None, (line.strip() for line in open(listing))):
+    dst = os.path.join(site, name)
+    if not os.path.exists(os.path.join(src, name)):
+        if os.path.exists(dst):
+            os.remove(dst)
+        if name in index:
+            rows[index[name]] = None
+        continue
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(os.path.join(src, name), dst)
+    data = open(dst, "rb").read()
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+    row = [name, f"sha256={digest.decode()}", str(len(data))]
+    if name in index:
+        rows[index[name]] = row
+    else:
+        rows.insert(len(rows) - 1, row)
+out = io.StringIO()
+csv.writer(out, lineterminator="\n").writerows(r for r in rows if r is not None)
+open(record, "w").write(out.getvalue())
+PY
+find "${site}/vllm" -name __pycache__ -prune -exec rm -rf {} +
+echo "${VLLM_REVISION}" >/opt/nemotron/vllm-revision
+rm -rf /tmp/vllm /tmp/vllm-files.txt
+EOF
+
+# -----------------------------------------------------------------------------
+# Megatron-LM, Megatron Lite, verl_mlite and nemorl_mlite at MEGATRON_REVISION
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+# The base image's runtime stage ships no uv.
+python -m pip install uv==0.12.5
+git init /tmp/Megatron-LM
+git -C /tmp/Megatron-LM remote add origin "${MEGATRON_REPO}"
+git -C /tmp/Megatron-LM fetch --no-tags --depth 1 origin "${MEGATRON_REVISION}"
+git -C /tmp/Megatron-LM checkout --detach "${MEGATRON_REVISION}"
+test "$(git -C /tmp/Megatron-LM rev-parse HEAD)" = "${MEGATRON_REVISION}"
+lite=/tmp/Megatron-LM/experimental/lite
+(cd / && uv pip install --no-deps --no-build-isolation \
+  --reinstall-package megatron-core --reinstall-package megatron-lite \
+  --reinstall-package verl-mlite --reinstall-package nemorl-mlite \
+  /tmp/Megatron-LM "${lite}" "${lite}/examples/verl" "${lite}/examples/nemo_rl")
+echo "${MEGATRON_REVISION}" >/opt/nemotron/megatron-revision
+rm -rf /tmp/Megatron-LM
+EOF
+
+# -----------------------------------------------------------------------------
+# ModelOpt and NeMo-RL's packages, never replacing what the base installed
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+if git -C /opt/nemo-rl rev-parse HEAD >/opt/nemotron/nemo-rl-revision; then
+  test -z "$(git -C /opt/nemo-rl status --porcelain --untracked-files=no)"
+fi
+# Pin everything already installed: venv packages to their versions, and the
+# base image's system packages (torch, ...) to never, which uv does not see.
+python - >/tmp/overrides.txt <<'PY'
+import importlib.metadata
+import os
+import sysconfig
+
+venv = os.path.realpath(sysconfig.get_paths()["purelib"])
+seen = set()
+for dist in importlib.metadata.distributions():
+    name = dist.metadata["Name"].lower().replace("_", "-")
+    if name in seen or name == "nvidia-modelopt":
+        continue
+    seen.add(name)
+    if os.path.realpath(str(dist.locate_file(""))).startswith(venv):
+        print(f"{name}=={dist.version}")
+    else:
+        print(f'{name}; sys_platform == "never"')
+PY
+uv pip install --override /tmp/overrides.txt "nvidia-modelopt==${MODELOPT_VERSION}"
+# NeMo-RL's imports that the base image lacks.
+uv pip install --override /tmp/overrides.txt \
+  math-verify==0.9.0 mlflow-skinny==3.17.1 soundfile==0.14.0 zstandard==0.25.0 \
+  colored==2.2.3 fastokens==0.3.4 num2words==0.5.14 swanlab==0.10.2 \
+  "nemo-lens[sdk,aiohttp] @ https://github.com/NVIDIA-NeMo/Lens/archive/b0f977d414b2f89938604a0b7eaa78ee08bc8700.tar.gz"
+site=$(python -c 'import site; print(site.getsitepackages()[0])')
+echo /opt/nemo-rl >"${site}/nemo_rl_checkout.pth"
+rm -rf /tmp/overrides.txt /root/.cache
+EOF
+
+# -----------------------------------------------------------------------------
+# Build smoke test
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+# Transformer Engine loads libcuda at import; the build has no GPU driver.
+mkdir -p /tmp/cuda-stubs
+ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stubs/libcuda.so.1
+(cd / && LD_LIBRARY_PATH=/tmp/cuda-stubs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}} python - <<'PY'
+import importlib.util
+import pathlib
+
+import modelopt
+import nemo_rl.algorithms.grpo  # noqa: F401
+import nemorl_mlite.policy_worker  # noqa: F401
+import nemorl_mlite.vllm_extension  # noqa: F401
+from nemo_rl.distributed.ray_actor_environment_registry import get_actor_python_env
+
+assert modelopt.__version__ == "0.47.0", modelopt.__version__
+get_actor_python_env("nemorl_mlite.policy_worker.MLitePolicyWorker")
+src = lambda m: pathlib.Path(importlib.util.find_spec(m).origin).read_text()
+assert "_all_ranks_have_matching_cache" in src("vllm.model_executor.warmup.kernel_warmup")
+PY
+)
+rm -rf /tmp/cuda-stubs
+EOF
+WORKDIR /workspace
