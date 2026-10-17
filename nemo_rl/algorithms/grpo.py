@@ -660,7 +660,8 @@ def setup(
         or generation_config["val_top_p"] != generation_config["top_p"]
         or generation_config["val_top_k"] != generation_config["top_k"]
     )
-    if val_sampling_overridden:
+    # val_temperature=0 is greedy validation, which every rollout path supports.
+    if val_sampling_overridden and generation_config["val_temperature"] != 0:
         assert generation_config["backend"] == "vllm" and should_use_nemo_gym(
             master_config
         ), (
@@ -4508,7 +4509,7 @@ def validate(
                     val_task_to_env,
                     max_seq_len=master_config.policy["max_total_sequence_length"],
                     max_rollout_turns=master_config.grpo.max_rollout_turns,
-                    greedy=False,
+                    greedy=master_config.policy["generation"]["val_temperature"] == 0,
                     deduplicate_multimodal_data=(
                         master_config.grpo.deduplicate_multimodal_data
                     ),
@@ -4521,7 +4522,7 @@ def validate(
                     val_task_to_env,
                     max_seq_len=master_config.policy["max_total_sequence_length"],
                     max_rollout_turns=master_config.grpo.max_rollout_turns,
-                    greedy=False,
+                    greedy=master_config.policy["generation"]["val_temperature"] == 0,
                     deduplicate_multimodal_data=(
                         master_config.grpo.deduplicate_multimodal_data
                     ),

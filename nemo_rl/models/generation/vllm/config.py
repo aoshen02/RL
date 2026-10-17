@@ -88,6 +88,12 @@ class VllmSpecificArgs(TypedDict):
     # Supports exact names, substrings, and fnmatch wildcards.
     quantization_ignore_patterns: NotRequired[list[str]]
     kv_cache_dtype: Literal["auto", "fp8", "fp8_e4m3", "fp8_ds_mla"]
+    # The policy refits static k/v scales with its weights; skip NeMo-RL's
+    # KV-scale calibration and sync.
+    kv_scales_in_refit_weights: NotRequired[bool]
+    # Subclass of VllmInternalWorkerExtension that vLLM workers load instead,
+    # for refit handling a policy outside NeMo-RL needs.
+    internal_worker_extension_cls: NotRequired[str]
     enforce_eager: NotRequired[bool]
     enable_return_routed_experts: NotRequired[bool]
     # Collect vLLM request, cache, and cumulative token counters in a model-owner

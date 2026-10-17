@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import os
 import warnings
 from collections import defaultdict
@@ -156,6 +157,8 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
 
         megatron_enabled = bool(config.get("megatron_cfg", {}).get("enabled", False))
         automodel_enabled = bool(config.get("automodel_cfg", {}).get("enabled", False))
+        external_cfg = config.get("external_cfg") or {}
+        external_enabled = bool(external_cfg.get("enabled", False))
         # Normalize in place: every downstream reader (workers, setup, train)
         # accesses draft config by attribute, so a hand-built PolicyConfig has
         # to be validated here rather than only inside MasterConfig.
@@ -249,7 +252,20 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 "which the fused path never materializes. Disable one of the "
                 "two."
             )
-        if megatron_enabled:
+        if external_enabled:
+            if megatron_enabled or automodel_enabled:
+                raise ValueError(
+                    "policy.external_cfg.enabled=true excludes megatron_cfg and "
+                    "automodel_cfg"
+                )
+            worker_builder_cls_fqn = external_cfg["worker_cls_fqn"]
+            # Lets the module register its actor environment.
+            importlib.import_module(worker_builder_cls_fqn.rsplit(".", 1)[0])
+            tp_size = external_cfg.get("tensor_parallel_size", 1)
+            pp_size = external_cfg.get("pipeline_parallel_size", 1)
+            cp_size = external_cfg.get("context_parallel_size", 1)
+            env_vars = dict(external_cfg.get("env_vars") or {})
+        elif megatron_enabled:
             worker_builder_cls_fqn = resolve_policy_worker_cls(
                 "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker",
                 config,

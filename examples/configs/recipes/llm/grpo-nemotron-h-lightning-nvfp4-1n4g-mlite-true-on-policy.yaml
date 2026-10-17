@@ -1,0 +1,166 @@
+# Nemotron 3.5 Lightning NVFP4 math GRPO, true on-policy, on 1 node x 4 GPUs.
+# Rollout: batch-invariant vLLM (TP1, V2 model runner) on the NVFP4 release with
+# MTP speculative decoding (k=3). Policy: Megatron Lite (nemorl_mlite, EP4) on
+# the same vLLM kernels, BF16 masters plus the release's ModelOpt static scales,
+# so the trainer's old logprobs equal the rollout logprobs bitwise. Colocated,
+# refit over IPC through vLLM's layerwise reload; the MTP block is trained and
+# refit to the drafter. Algorithm follows verl's Nemotron-H DAPO recipe.
+# Launch with examples/run_nemotron_h_lightning_nvfp4_mlite_true_on_policy.sh.
+defaults: ../../grpo_math_1B.yaml
+
+grpo:
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 8
+  max_num_steps: 2
+  normalize_rewards: false
+  use_leave_one_out_baseline: false
+  val_at_start: true
+  val_at_end: true
+  val_period: 0
+  max_val_samples: 30
+  val_batch_size: 30
+  val_num_generations_per_prompt: 1
+  seed: 42
+  # DAPO score: +1 / -1, then the overlong penalty.
+  reward_scaling:
+    enabled: true
+    source_min: 0.0
+    source_max: 1.0
+    target_min: -1.0
+    target_max: 1.0
+  reward_shaping:
+    enabled: true
+    overlong_buffer_length: 4096
+    overlong_buffer_penalty: 1.0
+    max_response_length: 14000
+
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.28
+  ratio_clip_c: 10.0
+  token_level_loss: true
+
+checkpointing:
+  enabled: false
+
+policy:
+  model_name: ???  # NVFP4 release
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template_kwargs:
+      enable_thinking: true
+  train_global_batch_size: 256  # 32 prompts x 8: 4 updates per step
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 16048  # prompt 2048 + response 14000
+  make_sequence_length_divisible_by: 1
+  dynamic_batching:
+    enabled: false
+  sequence_packing:
+    enabled: false
+  automodel_cfg:
+    enabled: false
+  megatron_cfg:
+    enabled: false
+  external_cfg:
+    enabled: true
+    worker_cls_fqn: nemorl_mlite.policy_worker.MLitePolicyWorker
+    trains_mtp: true
+    # Keys below are read by the mlite worker.
+    impl: vllm
+    model_name: nemotron_h
+    seed: 42
+    full_determinism: true
+    expert_parallel_size: 4
+    attention_backend_override: null
+    logprob_max_tokens: 16384
+    impl_cfg:
+      bf16_master_path: ???  # BF16 release
+      recompute: full
+      optimizer: fsdp2
+      mtp_enable: true
+      mtp_enable_train: true
+      mtp_lr: 1.0e-5
+      mtp_loss_scaling_factor: 0.1
+    optimizer:
+      optimizer: adam
+      lr: 1.0e-6
+      min_lr: 0.0
+      clip_grad: 1.0
+      weight_decay: 0.1
+      lr_warmup_steps: 0
+      lr_decay_style: constant
+      total_training_steps: ${grpo.max_num_steps}
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      offload_fraction: 1.0
+      use_precision_aware_optimizer: true
+      decoupled_weight_decay: true
+  generation:
+    max_new_tokens: 14000
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    val_temperature: 0.0
+    vllm_cfg:
+      precision: bfloat16
+      kv_cache_dtype: auto  # the checkpoint selects fp8_e4m3
+      logprobs_mode: raw_logprobs
+      kv_scales_in_refit_weights: true
+      internal_worker_extension_cls: nemorl_mlite.vllm_extension.MLiteVllmWorkerExtension
+      fp32_lm_head: false
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.45
+      max_model_len: 16048
+      enable_vllm_metrics_logger: false
+    vllm_kwargs:
+      moe_backend: flashinfer_cutedsl
+      max_num_batched_tokens: 16384
+      max_num_seqs: 128
+      speculative_config:
+        method: mtp
+        num_speculative_tokens: 3
+        # The MTP block is BF16, which the NVFP4-only CuTe-DSL MoE backend rejects.
+        moe_backend: flashinfer_cutlass
+        draft_load_config:
+          load_format: auto
+    colocated:
+      enabled: true
+
+data:
+  shuffle: true
+  train:
+    dataset_name: ResponseDataset
+    data_path: ???  # DAPO-Math-17K, {input, output} jsonl
+    input_key: input
+    output_key: output
+    split_validation_size: 0
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ???  # AIME-2024, {input, output} jsonl
+    input_key: input
+    output_key: output
+    split_validation_size: 0
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+
+env:
+  math:
+    num_workers: 16
+    math_verify_impl: dapo_math_verify
+
+logger:
+  log_dir: logs
+  wandb_enabled: false
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: false
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
