@@ -13,6 +13,9 @@
 #
 #   docker build -f docker/Dockerfile.nemotron_h_mlite_true_on_policy \
 #     --build-arg BASE_IMAGE=<nemotron-h-true-on-policy image> -t nemorl-nemotron-h-mlite .
+#
+# A build of this branch's recipe commit (linux/arm64, GB200) is published as
+# aosheninferact/nemotron-h-true-on-policy:nemorl-mlite-66c93cf.
 
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
@@ -112,7 +115,9 @@ EOF
 # -----------------------------------------------------------------------------
 RUN <<'EOF'
 set -eux
-if git -C /opt/nemo-rl rev-parse HEAD >/opt/nemotron/nemo-rl-revision; then
+# A build context without .git (e.g. a git archive) records no revision here.
+if nemo_rl_revision=$(git -C /opt/nemo-rl rev-parse HEAD); then
+  echo "${nemo_rl_revision}" >/opt/nemotron/nemo-rl-revision
   test -z "$(git -C /opt/nemo-rl status --porcelain --untracked-files=no)"
 fi
 # Pin everything already installed: venv packages to their versions, and the
