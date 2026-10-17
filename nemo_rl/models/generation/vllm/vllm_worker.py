@@ -748,6 +748,16 @@ class BaseVllmGenerationWorker:
             else "nemo_rl.models.generation.vllm.vllm_backend."
             "VllmInternalWorkerExtension"
         )
+        internal_extension_cls = self.cfg["vllm_cfg"].get(
+            "internal_worker_extension_cls"
+        )
+        if internal_extension_cls is not None:
+            if checkpoint_engine_config is not None:
+                raise ValueError(
+                    "vllm_cfg.internal_worker_extension_cls is not supported with "
+                    "the checkpoint engine"
+                )
+            default_worker_extension_cls = internal_extension_cls
         _validate_worker_extension_cls(vllm_kwargs, default_worker_extension_cls)
         _log_effective_quantization_ignore_patterns(self.cfg["vllm_cfg"], vllm_kwargs)
         llm_kwargs = dict(

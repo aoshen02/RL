@@ -1722,5 +1722,8 @@ class VllmGeneration(GenerationInterface):
         Only traditional per-tensor FP8 caches expose separately refittable
         k_scale/v_scale parameters.
         """
+        if self.cfg["vllm_cfg"].get("kv_scales_in_refit_weights", False):
+            # The policy streams the static k/v scales with its weights.
+            return False
         kv_cache_dtype = self.cfg["vllm_cfg"].get("kv_cache_dtype")
         return kv_cache_dtype in REFITTABLE_FP8_KV_CACHE_DTYPES

@@ -127,7 +127,10 @@ def main() -> None:
                     config.policy.get("draft")
                 )
                 megatron_cfg = config.policy.get("megatron_cfg") or {}
-                trains_mtp = bool(megatron_cfg.get("mtp_num_layers"))
+                external_cfg = config.policy.get("external_cfg") or {}
+                trains_mtp = bool(megatron_cfg.get("mtp_num_layers")) or bool(
+                    external_cfg.get("enabled") and external_cfg.get("trains_mtp")
+                )
                 config.policy["generation"] = configure_generation_config(
                     config.policy["generation"],
                     tokenizer,

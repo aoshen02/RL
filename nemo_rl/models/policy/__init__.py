@@ -42,19 +42,12 @@ def _patch_transformers_tokenizer_class_set():
     DTensor v2 all import from nemo_rl.models.policy) without polluting nemo_rl
     consumers that don't touch tokenizers.
     """
-    import transformers
-    from packaging.version import Version as PkgVersion
-
     # Transformers 5.12.1 still ships both registry entries, so the patch remains
     # load-bearing across the currently supported backend environments.
-    # TODO: remove this patch (and the assert below) once the deepseek_v3
-    # entries actually disappear upstream.
-    # https://github.com/NVIDIA-NeMo/RL/issues/2764
-    assert PkgVersion(transformers.__version__) < PkgVersion("5.13.0"), (
-        f"transformers {transformers.__version__} detected. "
-        "The deepseek_v3 tokenizer-blocklist patch was verified against <5.13. "
-        "Check if the upstream fix now applies and remove this patch if so."
-    )
+    # TODO: remove this patch once the deepseek_v3 entries actually disappear
+    # upstream. https://github.com/NVIDIA-NeMo/RL/issues/2764
+    # No version assert: the patch only discards the entries when present, so it
+    # is also safe on newer transformers (e.g. 5.17).
 
     from transformers import AutoTokenizer
     from transformers.models.auto.tokenization_auto import (
@@ -587,6 +580,24 @@ class MegatronConfig(TypedDict):
     zero_train_gen_mismatch: NotRequired[bool]
 
 
+class ExternalPolicyConfig(TypedDict):
+    """Policy worker implemented outside NeMo-RL.
+
+    The worker module is imported on the driver before the workers start, so it
+    can register its actor environment in ``ACTOR_ENVIRONMENT_REGISTRY``. Keys
+    other than those below are read by the worker itself.
+    """
+
+    enabled: bool
+    worker_cls_fqn: str
+    tensor_parallel_size: NotRequired[int]
+    pipeline_parallel_size: NotRequired[int]
+    context_parallel_size: NotRequired[int]
+    env_vars: NotRequired[dict[str, str]]
+    # The worker trains the model's MTP head and refits it to the vLLM drafter.
+    trains_mtp: NotRequired[bool]
+
+
 class TokenizerConfig(TypedDict):
     name: str
     # None selects NeMo-RL's passthrough prompt/response template.
@@ -687,6 +698,8 @@ class PolicyConfig(TypedDict):
     reward_model_cfg: NotRequired[RewardModelConfig]
     automodel_cfg: NotRequired[AutomodelConfig | AutomodelConfigDisabled]
     megatron_cfg: NotRequired[MegatronConfig | MegatronConfigDisabled]
+    # Training backend provided outside NeMo-RL (see ExternalPolicyConfig).
+    external_cfg: NotRequired["ExternalPolicyConfig"]
     draft: NotRequired[Eagle3DraftConfig]
     pretrained_checkpoint: NotRequired[PretrainedCheckpointConfig]
     # Resolved once by the driver and carried to the student workers and (via
